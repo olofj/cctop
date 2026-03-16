@@ -939,4 +939,59 @@ mod tests {
         app.prune(now);
         assert_eq!(app.entries.len(), 1);
     }
+
+    // --- Project filter tests ---
+
+    #[test]
+    fn project_filter_includes_matching() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, Some("myproj".to_string()));
+        app.ingest(vec![
+            make_entry("/home/user/myproj", "s1", now, 100),
+            make_entry("/home/user/other", "s2", now, 200),
+        ]);
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].project, "/home/user/myproj");
+    }
+
+    #[test]
+    fn project_filter_none_includes_all() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.ingest(vec![
+            make_entry("/proj1", "s1", now, 100),
+            make_entry("/proj2", "s2", now, 200),
+        ]);
+        assert_eq!(app.entries.len(), 2);
+    }
+
+    // --- f64_cmp tests ---
+
+    #[test]
+    fn f64_cmp_normal_values() {
+        assert_eq!(f64_cmp(1.0, 2.0), std::cmp::Ordering::Less);
+        assert_eq!(f64_cmp(2.0, 1.0), std::cmp::Ordering::Greater);
+        assert_eq!(f64_cmp(1.0, 1.0), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn f64_cmp_nan_does_not_panic() {
+        // NaN comparisons should return Equal, not panic
+        assert_eq!(f64_cmp(f64::NAN, 1.0), std::cmp::Ordering::Equal);
+        assert_eq!(f64_cmp(1.0, f64::NAN), std::cmp::Ordering::Equal);
+        assert_eq!(f64_cmp(f64::NAN, f64::NAN), std::cmp::Ordering::Equal);
+    }
+
+    // --- short_id tests ---
+
+    #[test]
+    fn short_id_truncates_long_ids() {
+        assert_eq!(short_id("abcdefghijklmnop"), "abcdefghijkl");
+    }
+
+    #[test]
+    fn short_id_keeps_short_ids() {
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id("exactly12chr"), "exactly12chr");
+    }
 }

@@ -16,13 +16,11 @@ use crate::types::RowKind;
 /// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
 /// Safe for multi-byte UTF-8.
 fn truncate(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(max_chars.saturating_sub(1)).collect();
-    if chars.next().is_some() {
-        format!("{}…", truncated)
-    } else {
-        s.to_string()
+    if s.chars().count() <= max_chars {
+        return s.to_string();
     }
+    let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", truncated)
 }
 
 const HEADER_HEIGHT: u16 = 3;
@@ -507,5 +505,52 @@ fn rate_color(tokens_per_min: f64) -> Color {
         Color::Yellow
     } else {
         Color::Red
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_length_unchanged() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string_adds_ellipsis() {
+        assert_eq!(truncate("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn truncate_multibyte_chars_no_panic() {
+        // The tree indicators ▸ and ▾ are 3 bytes each
+        let label = "▸ /home/user/very-long-project-name";
+        let result = truncate(label, 10);
+        assert!(result.ends_with('…'));
+        assert_eq!(result.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_all_multibyte() {
+        let label = "▸▾▸▾▸▾▸▾▸▾";
+        let result = truncate(label, 4);
+        assert_eq!(result, "▸▾▸…");
+        assert_eq!(result.chars().count(), 4);
+    }
+
+    #[test]
+    fn truncate_to_one() {
+        assert_eq!(truncate("hello", 1), "…");
+    }
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate("", 5), "");
     }
 }
