@@ -297,10 +297,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         }
     };
 
-    let max_value: f64 = buckets
-        .iter()
-        .map(&bucket_value)
-        .fold(0.0f64, f64::max);
+    let max_value: f64 = buckets.iter().map(&bucket_value).fold(0.0f64, f64::max);
 
     if max_value < 1e-9 {
         // Render empty state
