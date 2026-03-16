@@ -260,6 +260,15 @@ impl AppState {
                 session_id: None,
                 subagent_id: None,
             }),
+            RowKind::Model => {
+                // Model row — filter to this project + model (reuse project filter)
+                let project = self.find_parent_project(self.selected);
+                Some(Selection {
+                    project,
+                    session_id: None,
+                    subagent_id: None,
+                })
+            }
             RowKind::Session => {
                 let project = self.find_parent_project(self.selected);
                 Some(Selection {
@@ -447,6 +456,23 @@ impl AppState {
                 *proj.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
                 proj.sparkline[idx] += total;
 
+                // Per-model aggregation
+                let model_agg = proj
+                    .model_data
+                    .entry(entry.model.clone())
+                    .or_insert_with(|| ModelAgg::new(entry.model.clone()));
+                model_agg.input_tokens += entry.input_tokens;
+                model_agg.output_tokens += entry.output_tokens;
+                model_agg.cost += entry.cost;
+                model_agg.sparkline[idx] += total;
+                model_agg.sessions.insert(entry.session_id.clone());
+                if model_agg
+                    .last_activity
+                    .is_none_or(|ts| entry.timestamp > ts)
+                {
+                    model_agg.last_activity = Some(entry.timestamp);
+                }
+
                 let sess = proj
                     .session_data
                     .entry(entry.session_id.clone())
@@ -529,51 +555,46 @@ impl AppState {
             });
 
             if is_expanded {
-                let mut sessions: Vec<&SessionAgg> = proj.session_data.values().collect();
-                sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+                let has_multiple_models = proj.model_data.len() > 1;
 
-                for sess in sessions {
-                    let sess_key = format!("{}/{}", proj.name, sess.session_id);
-                    let sess_expanded = self.expanded.contains(&sess_key);
+                if has_multiple_models {
+                    // Show model breakdown rows; expanding a model shows its sessions
+                    let mut models: Vec<&ModelAgg> = proj.model_data.values().collect();
+                    models.sort_by(|a, b| f64_cmp(b.cost, a.cost));
 
-                    rows.push(DisplayRow {
-                        kind: RowKind::Session,
-                        label: short_id(&sess.session_id),
-                        sparkline: sess.sparkline,
-                        session_count: 0,
-                        model: dominant_model(&sess.model_costs),
-                        input_per_min: sess.input_tokens as f64 / minutes,
-                        output_per_min: sess.output_tokens as f64 / minutes,
-                        cost_per_min: sess.cost / minutes,
-                        cost_today: 0.0,
-                        last_activity: sess.last_activity,
-                        is_expanded: sess_expanded,
-                        depth: 1,
-                        tree_key: sess_key,
-                    });
+                    for model in models {
+                        let model_key = format!("{}\0{}", proj.name, model.model_name);
+                        let model_expanded = self.expanded.contains(&model_key);
 
-                    if sess_expanded {
-                        let mut agents: Vec<&SubagentAgg> = sess.subagent_data.values().collect();
-                        agents.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+                        rows.push(DisplayRow {
+                            kind: RowKind::Model,
+                            label: model.model_name.clone(),
+                            sparkline: model.sparkline,
+                            session_count: model.sessions.len(),
+                            model: model.model_name.clone(),
+                            input_per_min: model.input_tokens as f64 / minutes,
+                            output_per_min: model.output_tokens as f64 / minutes,
+                            cost_per_min: model.cost / minutes,
+                            cost_today: 0.0,
+                            last_activity: model.last_activity,
+                            is_expanded: model_expanded,
+                            depth: 1,
+                            tree_key: model_key.clone(),
+                        });
 
-                        for agent in agents {
-                            rows.push(DisplayRow {
-                                kind: RowKind::Subagent,
-                                label: short_id(&agent.agent_id),
-                                sparkline: agent.sparkline,
-                                session_count: 0,
-                                model: dominant_model(&agent.model_costs),
-                                input_per_min: agent.input_tokens as f64 / minutes,
-                                output_per_min: agent.output_tokens as f64 / minutes,
-                                cost_per_min: agent.cost / minutes,
-                                cost_today: 0.0,
-                                last_activity: agent.last_activity,
-                                is_expanded: false,
-                                depth: 2,
-                                tree_key: String::new(),
-                            });
+                        if model_expanded {
+                            self.emit_sessions_for_model(
+                                proj,
+                                &model.sessions,
+                                &model_key,
+                                minutes,
+                                &mut rows,
+                            );
                         }
                     }
+                } else {
+                    // Single model: show sessions directly
+                    self.emit_sessions(proj, &proj.name, 1, minutes, &mut rows);
                 }
             }
         }
@@ -589,6 +610,96 @@ impl AppState {
         }
         if !self.rows_cache.is_empty() {
             self.selected = self.selected.min(self.rows_cache.len() - 1);
+        }
+    }
+
+    /// Emit session rows (and their subagent children) for all sessions in a project.
+    fn emit_sessions(
+        &self,
+        proj: &ProjectAgg,
+        parent_key: &str,
+        depth: u8,
+        minutes: f64,
+        rows: &mut Vec<DisplayRow>,
+    ) {
+        let mut sessions: Vec<&SessionAgg> = proj.session_data.values().collect();
+        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+        for sess in sessions {
+            self.emit_one_session(sess, parent_key, depth, minutes, rows);
+        }
+    }
+
+    /// Emit session rows filtered to only those in `model_sessions`.
+    fn emit_sessions_for_model(
+        &self,
+        proj: &ProjectAgg,
+        model_sessions: &HashSet<String>,
+        parent_key: &str,
+        minutes: f64,
+        rows: &mut Vec<DisplayRow>,
+    ) {
+        let mut sessions: Vec<&SessionAgg> = proj
+            .session_data
+            .values()
+            .filter(|s| model_sessions.contains(&s.session_id))
+            .collect();
+        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+        for sess in sessions {
+            self.emit_one_session(sess, parent_key, 2, minutes, rows);
+        }
+    }
+
+    /// Emit a single session row and its subagent children.
+    fn emit_one_session(
+        &self,
+        sess: &SessionAgg,
+        parent_key: &str,
+        depth: u8,
+        minutes: f64,
+        rows: &mut Vec<DisplayRow>,
+    ) {
+        let sess_key = format!("{}/{}", parent_key, sess.session_id);
+        let sess_expanded = self.expanded.contains(&sess_key);
+
+        rows.push(DisplayRow {
+            kind: RowKind::Session,
+            label: short_id(&sess.session_id),
+            sparkline: sess.sparkline,
+            session_count: 0,
+            model: dominant_model(&sess.model_costs),
+            input_per_min: sess.input_tokens as f64 / minutes,
+            output_per_min: sess.output_tokens as f64 / minutes,
+            cost_per_min: sess.cost / minutes,
+            cost_today: 0.0,
+            last_activity: sess.last_activity,
+            is_expanded: sess_expanded,
+            depth,
+            tree_key: sess_key,
+        });
+
+        if sess_expanded {
+            let mut agents: Vec<&SubagentAgg> = sess.subagent_data.values().collect();
+            agents.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+            for agent in agents {
+                rows.push(DisplayRow {
+                    kind: RowKind::Subagent,
+                    label: short_id(&agent.agent_id),
+                    sparkline: agent.sparkline,
+                    session_count: 0,
+                    model: dominant_model(&agent.model_costs),
+                    input_per_min: agent.input_tokens as f64 / minutes,
+                    output_per_min: agent.output_tokens as f64 / minutes,
+                    cost_per_min: agent.cost / minutes,
+                    cost_today: 0.0,
+                    last_activity: agent.last_activity,
+                    is_expanded: false,
+                    depth: depth + 1,
+                    tree_key: String::new(),
+                });
+            }
         }
     }
 
@@ -658,6 +769,31 @@ fn weighted_avg(prev: u64, curr: u64, next: u64) -> u64 {
 
 // --- Internal aggregation structs ---
 
+struct ModelAgg {
+    model_name: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
+    last_activity: Option<DateTime<Utc>>,
+    sparkline: [u64; SPARKLINE_BUCKETS],
+    /// Session IDs that used this model.
+    sessions: HashSet<String>,
+}
+
+impl ModelAgg {
+    fn new(model_name: String) -> Self {
+        Self {
+            model_name,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: 0.0,
+            last_activity: None,
+            sparkline: [0; SPARKLINE_BUCKETS],
+            sessions: HashSet::new(),
+        }
+    }
+}
+
 struct ProjectAgg {
     name: String,
     input_tokens: u64,
@@ -668,6 +804,7 @@ struct ProjectAgg {
     last_activity: Option<DateTime<Utc>>,
     sparkline: [u64; SPARKLINE_BUCKETS],
     session_data: BTreeMap<String, SessionAgg>,
+    model_data: BTreeMap<String, ModelAgg>,
 }
 
 impl ProjectAgg {
@@ -682,6 +819,7 @@ impl ProjectAgg {
             last_activity: None,
             sparkline: [0; SPARKLINE_BUCKETS],
             session_data: BTreeMap::new(),
+            model_data: BTreeMap::new(),
         }
     }
 }

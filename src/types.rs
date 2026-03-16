@@ -204,6 +204,7 @@ impl SortColumn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     Project,
+    Model,
     Session,
     Subagent,
 }

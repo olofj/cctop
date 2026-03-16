@@ -177,10 +177,8 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
 
             let indent = "  ".repeat(row.depth as usize);
             let expand_indicator = match row.kind {
-                RowKind::Project if row.is_expanded => "▾",
-                RowKind::Project => "▸",
-                RowKind::Session if row.is_expanded => "▾",
-                RowKind::Session => "▸",
+                RowKind::Project | RowKind::Model | RowKind::Session if row.is_expanded => "▾",
+                RowKind::Project | RowKind::Model | RowKind::Session => "▸",
                 RowKind::Subagent => "└",
             };
             let label = format!("{}{} {}", indent, expand_indicator, row.label);
@@ -188,10 +186,9 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             let max_label_chars = if wide { 30 } else { 20 };
             let display_label = truncate(&label, max_label_chars);
 
-            let sessions_str = if row.kind == RowKind::Project {
-                format!("{}", row.session_count)
-            } else {
-                String::new()
+            let sessions_str = match row.kind {
+                RowKind::Project | RowKind::Model => format!("{}", row.session_count),
+                _ => String::new(),
             };
 
             let model_display = truncate(&row.model, 14);
