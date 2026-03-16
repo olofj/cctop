@@ -37,6 +37,9 @@ pub struct AppState {
     /// Currently selected row index.
     pub selected: usize,
 
+    /// Tree key of the selected row, used to preserve selection across rebuilds.
+    selected_key: Option<String>,
+
     /// Scroll offset for the table.
     pub scroll_offset: usize,
 
@@ -74,6 +77,7 @@ impl AppState {
             sort_column: SortColumn::CostRate,
             sort_ascending: false,
             selected: 0,
+            selected_key: None,
             scroll_offset: 0,
             expanded: HashSet::new(),
             bar_color_mode: BarColorMode::TokenType,
@@ -149,6 +153,11 @@ impl AppState {
 
     /// Force cache rebuild (e.g., after window/sort change).
     pub fn invalidate(&mut self) {
+        // Remember current selection so it survives row reordering
+        self.selected_key = self
+            .rows_cache
+            .get(self.selected)
+            .map(|r| r.tree_key.clone());
         self.cache_dirty = true;
     }
 
@@ -570,6 +579,14 @@ impl AppState {
         }
 
         self.rows_cache = rows;
+
+        // Restore selection to the same row identity after reordering
+        if let Some(ref key) = self.selected_key {
+            if let Some(pos) = self.rows_cache.iter().position(|r| &r.tree_key == key) {
+                self.selected = pos;
+            }
+            self.selected_key = None;
+        }
         if !self.rows_cache.is_empty() {
             self.selected = self.selected.min(self.rows_cache.len() - 1);
         }
