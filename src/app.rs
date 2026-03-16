@@ -46,6 +46,9 @@ pub struct AppState {
     /// Hidden project names.
     hidden: HashSet<String>,
 
+    /// Optional project name substring filter (from --project flag).
+    project_filter: Option<String>,
+
     /// Status message (errors, etc.)
     pub status: Option<String>,
 
@@ -55,7 +58,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(window: WindowSize) -> Self {
+    pub fn new(window: WindowSize, project_filter: Option<String>) -> Self {
         Self {
             entries: VecDeque::new(),
             loaded_costs: HashMap::new(),
@@ -68,15 +71,22 @@ impl AppState {
             scroll_offset: 0,
             expanded: HashSet::new(),
             hidden: HashSet::new(),
+            project_filter,
             status: None,
             rows_cache: Vec::new(),
             cache_dirty: true,
         }
     }
 
-    /// Ingest new entries from the watcher.
+    /// Ingest new entries from the watcher, applying the project filter.
     pub fn ingest(&mut self, entries: Vec<TokenEntry>) {
         for entry in entries {
+            // Apply project filter
+            if let Some(ref filter) = self.project_filter {
+                if !entry.project.contains(filter.as_str()) {
+                    continue;
+                }
+            }
             if !self.seen_hashes.insert(entry.dedup_key.clone()) {
                 continue;
             }
@@ -654,7 +664,7 @@ mod tests {
 
     #[test]
     fn histogram_empty_entries() {
-        let app = AppState::new(WindowSize::W5m);
+        let app = AppState::new(WindowSize::W5m, None);
         let buckets = app.histogram(fixed_now(), 10);
         assert_eq!(buckets.len(), 10);
         assert!(buckets.iter().all(|b| b.input_tokens == 0));
@@ -663,7 +673,7 @@ mod tests {
     #[test]
     fn histogram_entry_in_last_bucket() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
         // Entry 1 second ago → should land in the last bucket
         app.ingest(vec![make_entry(
             "/test",
@@ -681,7 +691,7 @@ mod tests {
     #[test]
     fn histogram_entry_in_first_bucket() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
         // Entry 4m59s ago (almost at the start of a 5m window)
         app.ingest(vec![make_entry(
             "/test",
@@ -699,7 +709,7 @@ mod tests {
     #[test]
     fn histogram_entries_outside_window_excluded() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W1m);
+        let mut app = AppState::new(WindowSize::W1m, None);
         // Entry 2 minutes ago → outside 1m window
         app.ingest(vec![make_entry(
             "/test",
@@ -722,10 +732,10 @@ mod tests {
 
         let entry_ts = now1 - chrono::Duration::seconds(30);
 
-        let mut app1 = AppState::new(WindowSize::W5m);
+        let mut app1 = AppState::new(WindowSize::W5m, None);
         app1.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
-        let mut app2 = AppState::new(WindowSize::W5m);
+        let mut app2 = AppState::new(WindowSize::W5m, None);
         app2.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
         let h1 = app1.histogram(now1, 8);
@@ -753,7 +763,7 @@ mod tests {
 
         // Place entry at a known position
         let entry_ts = now - chrono::Duration::seconds(60);
-        let mut app = AppState::new(WindowSize::W8h);
+        let mut app = AppState::new(WindowSize::W8h, None);
         app.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
         let h1 = app.histogram(now, num_buckets);
@@ -777,7 +787,7 @@ mod tests {
     #[test]
     fn sparkline_populated_in_rows() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
 
         // Add entries at different times within the window
         app.ingest(vec![
@@ -795,7 +805,7 @@ mod tests {
     #[test]
     fn sparkline_zero_when_no_activity_in_window() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W1m);
+        let mut app = AppState::new(WindowSize::W1m, None);
 
         // Entry 5 minutes ago — outside 1m window
         app.ingest(vec![make_entry(
@@ -815,7 +825,7 @@ mod tests {
     #[test]
     fn sparkline_distributes_across_buckets() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
 
         // 8 buckets over 300s = 37.5s each
         // Place entries in distinct buckets
@@ -891,7 +901,7 @@ mod tests {
     #[test]
     fn ingest_deduplicates() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
         let entry = make_entry("/proj", "s1", now, 100);
         let dup = entry.clone();
         app.ingest(vec![entry, dup]);
@@ -904,7 +914,7 @@ mod tests {
     #[test]
     fn prune_removes_old_entries() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
         // Entry 25 hours ago
         app.ingest(vec![make_entry(
             "/proj",
@@ -920,7 +930,7 @@ mod tests {
     #[test]
     fn prune_keeps_recent_entries() {
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m);
+        let mut app = AppState::new(WindowSize::W5m, None);
         app.ingest(vec![make_entry(
             "/proj",
             "s1",

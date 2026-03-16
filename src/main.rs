@@ -34,6 +34,10 @@ struct Cli {
     #[arg(short, long)]
     project: Option<String>,
 
+    /// List discovered projects and exit
+    #[arg(long)]
+    list_projects: bool,
+
     /// UI refresh interval in milliseconds
     #[arg(long, default_value = "250")]
     tick_rate: u64,
@@ -62,12 +66,26 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    // --list-projects: print discovered projects and exit
+    if cli.list_projects {
+        use std::collections::BTreeSet;
+        let files = discovery::glob_usage_files(&claude_paths);
+        let projects: BTreeSet<String> = files
+            .iter()
+            .map(|p| discovery::extract_project_from_path(p))
+            .collect();
+        for p in &projects {
+            println!("{}", p);
+        }
+        std::process::exit(0);
+    }
+
     // Initial scan + start file watcher
     let (initial_entries, watcher_rx) =
         watcher::start(claude_paths, types::MAX_RETENTION_SECS);
 
     // Build initial app state
-    let mut app = AppState::new(window);
+    let mut app = AppState::new(window, cli.project);
     app.ingest(initial_entries);
 
     // Initialize terminal
