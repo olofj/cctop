@@ -24,6 +24,8 @@ like htop, but for your Claude Code spend.
  ↑↓ navigate  ←→ window  Enter expand  s sort  c collapse  q quit
 ```
 
+![cctop screenshot showing an 8-hour window with multiple projects](doc/screenshot.png)
+
 ## Features
 
 - **Live monitoring** via inotify filesystem notifications -- no polling
