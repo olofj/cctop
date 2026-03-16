@@ -106,9 +106,16 @@ fn main() -> io::Result<()> {
         if event::poll(tick_rate)?
             && let Event::Key(key) = event::read()?
         {
+            // Help overlay intercepts all keys
+            if app.show_help {
+                app.show_help = false;
+                continue;
+            }
+
             match (key.code, key.modifiers) {
                 (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                (KeyCode::Char('?'), _) => app.show_help = true,
 
                 (KeyCode::Up | KeyCode::Char('k'), _) => app.select_up(),
                 (KeyCode::Down | KeyCode::Char('j'), _) => app.select_down(),
@@ -151,6 +158,10 @@ fn main() -> io::Result<()> {
                 }
                 (KeyCode::Char('m'), _) => {
                     app.graph_metric = app.graph_metric.toggle();
+                }
+                (KeyCode::Char('v'), _) => {
+                    app.view_mode = app.view_mode.toggle();
+                    app.invalidate();
                 }
 
                 _ => {}

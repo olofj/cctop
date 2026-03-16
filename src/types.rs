@@ -232,6 +232,31 @@ pub struct DisplayRow {
 }
 
 /// One time-bucket for the histogram.
+/// Top-level grouping mode for the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Group by project, drill into models/sessions.
+    ByProject,
+    /// Group by model, drill into projects/sessions.
+    ByModel,
+}
+
+impl ViewMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::ByProject => Self::ByModel,
+            Self::ByModel => Self::ByProject,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ByProject => "project",
+            Self::ByModel => "model",
+        }
+    }
+}
+
 /// What's currently selected in the table — used for histogram filtering.
 #[derive(Debug, Clone)]
 pub struct Selection {

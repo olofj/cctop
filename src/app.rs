@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 
 use crate::types::{
     BarColorMode, DisplayRow, GraphMetric, HistBucket, MAX_RETENTION_SECS, RowKind,
-    SPARKLINE_BUCKETS, Selection, SortColumn, TokenEntry, WindowSize,
+    SPARKLINE_BUCKETS, Selection, SortColumn, TokenEntry, ViewMode, WindowSize,
 };
 
 pub struct AppState {
@@ -52,11 +52,17 @@ pub struct AppState {
     /// What the histogram Y-axis shows.
     pub graph_metric: GraphMetric,
 
+    /// Top-level grouping mode.
+    pub view_mode: ViewMode,
+
     /// Hidden project names.
     hidden: HashSet<String>,
 
     /// Optional project name substring filter (from --project flag).
     project_filter: Option<String>,
+
+    /// Whether the help overlay is visible.
+    pub show_help: bool,
 
     /// Status message (errors, etc.)
     pub status: Option<String>,
@@ -82,6 +88,8 @@ impl AppState {
             expanded: HashSet::new(),
             bar_color_mode: BarColorMode::TokenType,
             graph_metric: GraphMetric::Cost,
+            view_mode: ViewMode::ByProject,
+            show_help: false,
             hidden: HashSet::new(),
             project_filter,
             status: None,
@@ -264,6 +272,7 @@ impl AppState {
             RowKind::Model => {
                 let project = self.find_parent_project(self.selected);
                 Some(Selection {
+                    // In model-first view, project is empty for top-level model rows
                     project,
                     model: Some(row.model.clone()),
                     session_id: None,
@@ -336,7 +345,7 @@ impl AppState {
         let mut buckets = vec![HistBucket::default(); num_buckets];
 
         for e in &self.entries {
-            if e.project != sel.project {
+            if !sel.project.is_empty() && e.project != sel.project {
                 continue;
             }
             if let Some(ref model) = sel.model
@@ -536,10 +545,33 @@ impl AppState {
         }
 
         let mut rows = Vec::new();
-        let mut projects: Vec<ProjectAgg> = project_data.into_values().collect();
-        self.sort_projects(&mut projects, minutes);
+        let projects: Vec<ProjectAgg> = project_data.into_values().collect();
 
-        for proj in &projects {
+        match self.view_mode {
+            ViewMode::ByProject => self.emit_project_view(&projects, minutes, &mut rows),
+            ViewMode::ByModel => self.emit_model_view(&projects, minutes, &mut rows),
+        }
+
+        self.rows_cache = rows;
+
+        // Restore selection to the same row identity after reordering
+        if let Some(ref key) = self.selected_key {
+            if let Some(pos) = self.rows_cache.iter().position(|r| &r.tree_key == key) {
+                self.selected = pos;
+            }
+            self.selected_key = None;
+        }
+        if !self.rows_cache.is_empty() {
+            self.selected = self.selected.min(self.rows_cache.len() - 1);
+        }
+    }
+
+    /// Emit rows in project-first view.
+    fn emit_project_view(&self, projects: &[ProjectAgg], minutes: f64, rows: &mut Vec<DisplayRow>) {
+        let mut sorted: Vec<&ProjectAgg> = projects.iter().collect();
+        self.sort_project_refs(&mut sorted, minutes);
+
+        for proj in sorted {
             if self.hidden.contains(&proj.name) {
                 continue;
             }
@@ -563,10 +595,7 @@ impl AppState {
             });
 
             if is_expanded {
-                let has_multiple_models = proj.model_data.len() > 1;
-
-                if has_multiple_models {
-                    // Show model breakdown rows; expanding a model shows its sessions
+                if proj.model_data.len() > 1 {
                     let mut models: Vec<&ModelAgg> = proj.model_data.values().collect();
                     models.sort_by(|a, b| f64_cmp(b.cost, a.cost));
 
@@ -596,28 +625,106 @@ impl AppState {
                                 &model.sessions,
                                 &model_key,
                                 minutes,
-                                &mut rows,
+                                rows,
                             );
                         }
                     }
                 } else {
-                    // Single model: show sessions directly
-                    self.emit_sessions(proj, &proj.name, 1, minutes, &mut rows);
+                    self.emit_sessions(proj, &proj.name, 1, minutes, rows);
                 }
             }
         }
+    }
 
-        self.rows_cache = rows;
-
-        // Restore selection to the same row identity after reordering
-        if let Some(ref key) = self.selected_key {
-            if let Some(pos) = self.rows_cache.iter().position(|r| &r.tree_key == key) {
-                self.selected = pos;
+    /// Emit rows in model-first view: group by model across all projects.
+    fn emit_model_view(&self, projects: &[ProjectAgg], minutes: f64, rows: &mut Vec<DisplayRow>) {
+        // Aggregate across projects by model
+        let mut global_models: BTreeMap<String, GlobalModelAgg> = BTreeMap::new();
+        for proj in projects {
+            if self.hidden.contains(&proj.name) {
+                continue;
             }
-            self.selected_key = None;
+            for (model_name, model_agg) in &proj.model_data {
+                let gm = global_models
+                    .entry(model_name.clone())
+                    .or_insert_with(|| GlobalModelAgg::new(model_name.clone()));
+                gm.input_tokens += model_agg.input_tokens;
+                gm.output_tokens += model_agg.output_tokens;
+                gm.cost += model_agg.cost;
+                gm.session_count += model_agg.sessions.len();
+                for (i, v) in model_agg.sparkline.iter().enumerate() {
+                    gm.sparkline[i] += v;
+                }
+                if gm
+                    .last_activity
+                    .is_none_or(|t| model_agg.last_activity.is_some_and(|mt| mt > t))
+                {
+                    gm.last_activity = model_agg.last_activity;
+                }
+                gm.projects.push((proj.name.clone(), model_agg));
+            }
         }
-        if !self.rows_cache.is_empty() {
-            self.selected = self.selected.min(self.rows_cache.len() - 1);
+
+        let mut sorted: Vec<GlobalModelAgg> = global_models.into_values().collect();
+        sorted.sort_by(|a, b| f64_cmp(b.cost, a.cost));
+
+        for gm in &sorted {
+            let model_key = format!("\0{}", gm.model_name);
+            let is_expanded = self.expanded.contains(&model_key);
+
+            rows.push(DisplayRow {
+                kind: RowKind::Model,
+                label: gm.model_name.clone(),
+                sparkline: gm.sparkline,
+                session_count: gm.session_count,
+                model: gm.model_name.clone(),
+                input_per_min: gm.input_tokens as f64 / minutes,
+                output_per_min: gm.output_tokens as f64 / minutes,
+                cost_per_min: gm.cost / minutes,
+                cost_today: 0.0,
+                last_activity: gm.last_activity,
+                is_expanded,
+                depth: 0,
+                tree_key: model_key.clone(),
+            });
+
+            if is_expanded {
+                // Show projects under this model
+                for (proj_name, model_agg) in &gm.projects {
+                    let proj_key = format!("{}\0{}", model_key, proj_name);
+                    let proj_expanded = self.expanded.contains(&proj_key);
+                    let loaded_cost = self.loaded_costs.get(proj_name).copied().unwrap_or(0.0);
+
+                    rows.push(DisplayRow {
+                        kind: RowKind::Project,
+                        label: proj_name.clone(),
+                        sparkline: model_agg.sparkline,
+                        session_count: model_agg.sessions.len(),
+                        model: gm.model_name.clone(),
+                        input_per_min: model_agg.input_tokens as f64 / minutes,
+                        output_per_min: model_agg.output_tokens as f64 / minutes,
+                        cost_per_min: model_agg.cost / minutes,
+                        cost_today: loaded_cost,
+                        last_activity: model_agg.last_activity,
+                        is_expanded: proj_expanded,
+                        depth: 1,
+                        tree_key: proj_key.clone(),
+                    });
+
+                    if proj_expanded {
+                        // Find the full ProjectAgg to emit its sessions
+                        if let Some(proj) = projects.iter().find(|p| p.name == *proj_name) {
+                            self.emit_sessions_for_model(
+                                proj,
+                                &model_agg.sessions,
+                                &proj_key,
+                                minutes,
+                                rows,
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -711,7 +818,7 @@ impl AppState {
         }
     }
 
-    fn sort_projects(&self, projects: &mut [ProjectAgg], minutes: f64) {
+    fn sort_project_refs(&self, projects: &mut [&ProjectAgg], minutes: f64) {
         let asc = self.sort_ascending;
         projects.sort_by(|a, b| {
             let cmp = match self.sort_column {
@@ -776,6 +883,33 @@ fn weighted_avg(prev: u64, curr: u64, next: u64) -> u64 {
 }
 
 // --- Internal aggregation structs ---
+
+/// Cross-project model aggregation for model-first view.
+struct GlobalModelAgg<'a> {
+    model_name: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
+    session_count: usize,
+    last_activity: Option<DateTime<Utc>>,
+    sparkline: [u64; SPARKLINE_BUCKETS],
+    projects: Vec<(String, &'a ModelAgg)>,
+}
+
+impl<'a> GlobalModelAgg<'a> {
+    fn new(model_name: String) -> Self {
+        Self {
+            model_name,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: 0.0,
+            session_count: 0,
+            last_activity: None,
+            sparkline: [0; SPARKLINE_BUCKETS],
+            projects: Vec::new(),
+        }
+    }
+}
 
 struct ModelAgg {
     model_name: String,

@@ -83,6 +83,10 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
         render_graph(f, app, chunks[2], now);
     }
     render_footer(f, chunks[3], app);
+
+    if app.show_help {
+        render_help(f, area);
+    }
 }
 
 fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
@@ -530,12 +534,16 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
         " color({})  ",
         app.bar_color_mode.label()
     )));
+    spans.push(Span::styled("v", Style::default().fg(COL_KEY)));
+    spans.push(Span::raw(format!(" view({})  ", app.view_mode.label())));
     spans.push(Span::styled("m", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(format!(" graph({})  ", app.graph_metric.label())));
     spans.push(Span::styled("c", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(" collapse  "));
     spans.push(Span::styled("q", Style::default().fg(COL_KEY)));
-    spans.push(Span::raw(" quit"));
+    spans.push(Span::raw(" quit  "));
+    spans.push(Span::styled("?", Style::default().fg(COL_KEY)));
+    spans.push(Span::raw(" help"));
 
     // Right-align the per-bar duration
     let keys_width: usize = spans.iter().map(|s| s.width()).sum();
@@ -552,6 +560,69 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
 
     let footer = Paragraph::new(Line::from(spans));
     f.render_widget(footer, area);
+}
+
+fn render_help(f: &mut Frame, area: Rect) {
+    let help_lines = vec![
+        Line::from(Span::styled(
+            " cctop — Keyboard Shortcuts ",
+            Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        help_line("↑↓  j/k", "Navigate rows"),
+        help_line("Enter  Space", "Expand/collapse selected row"),
+        help_line("←→  h/l", "Shrink/grow time window"),
+        help_line("g / G", "Jump to top / bottom"),
+        help_line("PgUp / PgDn", "Scroll by page"),
+        Line::raw(""),
+        help_line("s", "Cycle sort column"),
+        help_line("S", "Reverse sort direction"),
+        help_line("v", "Toggle view (project / model)"),
+        help_line("t", "Toggle graph highlight (all / selected)"),
+        help_line("m", "Toggle graph metric ($ / tokens)"),
+        Line::raw(""),
+        help_line("d", "Hide selected project"),
+        help_line("u", "Unhide all hidden projects"),
+        help_line("c", "Collapse all expanded rows"),
+        Line::raw(""),
+        help_line("q  Esc", "Quit"),
+        help_line("?", "Toggle this help"),
+        Line::raw(""),
+        Line::from(Span::styled(
+            " Press any key to close ",
+            Style::default().fg(COL_DIM),
+        )),
+    ];
+
+    let height = help_lines.len() as u16 + 2; // +2 for border
+    let width = 46;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+
+    let popup_area = Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    };
+
+    // Clear the area behind the popup
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(COL_ACCENT))
+        .style(Style::default().bg(Color::Black));
+
+    let help = Paragraph::new(help_lines).block(block);
+    f.render_widget(help, popup_area);
+}
+
+fn help_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("  {:14}", key), Style::default().fg(COL_KEY)),
+        Span::raw(desc),
+    ])
 }
 
 fn cost_color(cost_per_min: f64) -> Color {
