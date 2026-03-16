@@ -611,8 +611,8 @@ fn render_help(f: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(COL_ACCENT))
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(COL_ACCENT).bg(Color::Black))
+        .style(Style::default().fg(Color::White).bg(Color::Black));
 
     let help = Paragraph::new(help_lines).block(block);
     f.render_widget(help, popup_area);
