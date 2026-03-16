@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Olof Johansson
+//
 // File system watcher and incremental JSONL reader.
 
 use std::collections::HashMap;

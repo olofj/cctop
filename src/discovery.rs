@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Olof Johansson
+//
 // Claude config path discovery and JSONL file location, adapted from ccusage.
 
 use std::path::{Path, PathBuf};

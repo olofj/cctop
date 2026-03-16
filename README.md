@@ -77,6 +77,8 @@ cctop -p myproject
 | `←` `→` / `h` `l` | Shrink/grow time window |
 | `s` | Cycle sort column ($/min, IN/min, OUT/min, Last, Project) |
 | `S` | Reverse sort direction |
+| `d` | Hide selected project |
+| `u` | Unhide all hidden projects |
 | `c` | Collapse all expanded rows |
 | `g` / `G` | Jump to top/bottom |
 | `PgUp` / `PgDn` | Scroll by page |
