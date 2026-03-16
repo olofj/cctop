@@ -274,7 +274,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     // Reserve left margin for Y-axis labels (7 chars) and right margin (1 char)
     let y_label_width: u16 = 7;
     let chart_width = inner.width.saturating_sub(y_label_width + 1) as usize;
-    let chart_height = inner.height.saturating_sub(1) as usize; // 1 line for X-axis labels
+    let chart_height = inner.height.saturating_sub(1) as usize; // 1 line for X-axis
 
     if chart_width < 4 || chart_height < 1 {
         return;
@@ -397,7 +397,6 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     // X-axis time labels (bottom line)
     let x_axis_y = chart_y + chart_height as u16;
     if x_axis_y < inner.y + inner.height {
-        // Show labels at: start (oldest), middle, end (now)
         let time_labels = [
             (0usize, format!("-{}", app.window.label())),
             (chart_width / 2, format!("-{}", half_label(app.window))),
@@ -411,34 +410,10 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             x_line.replace_range(start..end, &label[..end - start]);
         }
 
-        let mut spans = vec![
+        let spans = vec![
             Span::raw(" ".repeat(y_label_width as usize)),
             Span::styled(x_line, Style::default().fg(COL_DIM)),
         ];
-
-        // Legend depends on color mode
-        let has_room = inner.width as usize > chart_width + y_label_width as usize + 16;
-        if has_room {
-            match color_mode {
-                crate::types::BarColorMode::TokenType => {
-                    spans.push(Span::styled(" ■", Style::default().fg(COL_INPUT)));
-                    spans.push(Span::styled("in", Style::default().fg(COL_DIM)));
-                    spans.push(Span::styled(" ■", Style::default().fg(COL_OUTPUT)));
-                    spans.push(Span::styled("out", Style::default().fg(COL_DIM)));
-                    spans.push(Span::styled(" ■", Style::default().fg(COL_CACHE)));
-                    spans.push(Span::styled("cache", Style::default().fg(COL_DIM)));
-                }
-                crate::types::BarColorMode::Selected => {
-                    if let Some(ref sel) = selection {
-                        let short = truncate(&sel.display_name(), 12);
-                        spans.push(Span::styled(" ■", Style::default().fg(COL_HIGHLIGHT)));
-                        spans.push(Span::styled(short, Style::default().fg(COL_DIM)));
-                        spans.push(Span::styled(" ■", Style::default().fg(COL_DIM)));
-                        spans.push(Span::styled("other", Style::default().fg(COL_DIM)));
-                    }
-                }
-            }
-        }
 
         f.render_widget(
             Paragraph::new(Line::from(spans)),
@@ -449,6 +424,28 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
                 height: 1,
             },
         );
+    }
+}
+
+/// Format a duration in seconds into a compact human label.
+fn format_duration_short(secs: f64) -> String {
+    if secs < 1.0 {
+        format!("{:.0}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        if secs.fract() < 0.05 {
+            format!("{:.0}s", secs)
+        } else {
+            format!("{:.1}s", secs)
+        }
+    } else if secs < 3600.0 {
+        let m = secs / 60.0;
+        if m.fract() < 0.05 {
+            format!("{:.0}m", m)
+        } else {
+            format!("{:.1}m", m)
+        }
+    } else {
+        format!("{:.1}h", secs / 3600.0)
     }
 }
 
@@ -518,6 +515,19 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
     spans.push(Span::raw(" collapse  "));
     spans.push(Span::styled("q", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(" quit"));
+
+    // Right-align the per-bar duration
+    let keys_width: usize = spans.iter().map(|s| s.width()).sum();
+    let chart_cols = area.width.saturating_sub(8) as usize; // approx graph columns
+    if chart_cols > 0 {
+        let bar_secs = app.window.as_secs() as f64 / chart_cols as f64;
+        let bar_info = format!("{}/bar", format_duration_short(bar_secs));
+        let pad = area.width as usize - keys_width - bar_info.len();
+        if pad > 2 {
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(bar_info, Style::default().fg(COL_DIM)));
+        }
+    }
 
     let footer = Paragraph::new(Line::from(spans));
     f.render_widget(footer, area);

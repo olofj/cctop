@@ -239,22 +239,6 @@ pub struct Selection {
     pub subagent_id: Option<String>,
 }
 
-impl Selection {
-    pub fn display_name(&self) -> String {
-        if let Some(ref aid) = self.subagent_id {
-            aid.clone()
-        } else if let Some(ref sid) = self.session_id {
-            sid.clone()
-        } else {
-            self.project
-                .rsplit('/')
-                .next()
-                .unwrap_or(&self.project)
-                .to_string()
-        }
-    }
-}
-
 /// One time-bucket for the histogram.
 #[derive(Debug, Clone, Default)]
 pub struct HistBucket {
