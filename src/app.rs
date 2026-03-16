@@ -465,15 +465,9 @@ impl AppState {
         let asc = self.sort_ascending;
         projects.sort_by(|a, b| {
             let cmp = match self.sort_column {
-                SortColumn::CostRate => {
-                    (b.cost / minutes).partial_cmp(&(a.cost / minutes)).unwrap()
-                }
-                SortColumn::InputRate => {
-                    (b.input_tokens as f64).partial_cmp(&(a.input_tokens as f64)).unwrap()
-                }
-                SortColumn::OutputRate => {
-                    (b.output_tokens as f64).partial_cmp(&(a.output_tokens as f64)).unwrap()
-                }
+                SortColumn::CostRate => f64_cmp(b.cost / minutes, a.cost / minutes),
+                SortColumn::InputRate => f64_cmp(b.input_tokens as f64, a.input_tokens as f64),
+                SortColumn::OutputRate => f64_cmp(b.output_tokens as f64, a.output_tokens as f64),
                 SortColumn::LastActivity => b.last_activity.cmp(&a.last_activity),
                 SortColumn::Project => a.name.cmp(&b.name),
             };
@@ -482,10 +476,15 @@ impl AppState {
     }
 }
 
+/// Compare two f64 values without panicking on NaN.
+fn f64_cmp(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
 fn dominant_model(model_costs: &HashMap<String, f64>) -> String {
     model_costs
         .iter()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(m, _)| m.clone())
         .unwrap_or_else(|| "-".to_string())
 }
