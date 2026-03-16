@@ -433,22 +433,30 @@ fn half_label(window: crate::types::WindowSize) -> &'static str {
 
 fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
     let sort_label = app.sort_column.label();
-    let help = Line::from(vec![
+    let hidden = app.hidden_count();
+
+    let mut spans = vec![
         Span::styled(" ↑↓", Style::default().fg(Color::Yellow)),
-        Span::raw(" navigate  "),
+        Span::raw(" nav  "),
         Span::styled("←→", Style::default().fg(Color::Yellow)),
         Span::raw(" window  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
         Span::raw(" expand  "),
         Span::styled("s", Style::default().fg(Color::Yellow)),
         Span::raw(format!(" sort({})  ", sort_label)),
-        Span::styled("c", Style::default().fg(Color::Yellow)),
-        Span::raw(" collapse  "),
-        Span::styled("q", Style::default().fg(Color::Yellow)),
-        Span::raw(" quit"),
-    ]);
+        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::raw(" hide  "),
+    ];
+    if hidden > 0 {
+        spans.push(Span::styled("u", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(format!(" unhide({})  ", hidden)));
+    }
+    spans.push(Span::styled("c", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" collapse  "));
+    spans.push(Span::styled("q", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" quit"));
 
-    let footer = Paragraph::new(help);
+    let footer = Paragraph::new(Line::from(spans));
     f.render_widget(footer, area);
 }
 

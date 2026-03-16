@@ -123,6 +123,9 @@ fn main() -> io::Result<()> {
 
                     (KeyCode::Char('c'), _) => app.collapse_all(),
 
+                    (KeyCode::Char('d'), _) => app.hide_selected(),
+                    (KeyCode::Char('u'), _) => app.unhide_all(),
+
                     _ => {}
                 }
             }

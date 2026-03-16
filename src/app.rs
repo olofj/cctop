@@ -40,6 +40,9 @@ pub struct AppState {
     /// Expanded tree keys (project paths and "project/session" keys).
     expanded: HashSet<String>,
 
+    /// Hidden project names.
+    hidden: HashSet<String>,
+
     /// Status message (errors, etc.)
     pub status: Option<String>,
 
@@ -61,6 +64,7 @@ impl AppState {
             selected: 0,
             scroll_offset: 0,
             expanded: HashSet::new(),
+            hidden: HashSet::new(),
             status: None,
             rows_cache: Vec::new(),
             cache_dirty: true,
@@ -208,6 +212,38 @@ impl AppState {
         self.cache_dirty = true;
     }
 
+    /// Hide the project of the currently selected row.
+    pub fn hide_selected(&mut self) {
+        if let Some(row) = self.rows_cache.get(self.selected) {
+            // Find the project name: for project rows it's the label,
+            // for session/subagent rows walk up via tree_key.
+            let project = match row.kind {
+                RowKind::Project => row.label.clone(),
+                _ => {
+                    // tree_key is "project/session" — extract project part
+                    row.tree_key.split('/').next().unwrap_or("").to_string()
+                }
+            };
+            if !project.is_empty() {
+                self.hidden.insert(project);
+                self.cache_dirty = true;
+            }
+        }
+    }
+
+    /// Unhide all hidden projects.
+    pub fn unhide_all(&mut self) {
+        if !self.hidden.is_empty() {
+            self.hidden.clear();
+            self.cache_dirty = true;
+        }
+    }
+
+    /// Number of currently hidden projects.
+    pub fn hidden_count(&self) -> usize {
+        self.hidden.len()
+    }
+
     pub fn select_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
@@ -334,6 +370,9 @@ impl AppState {
         self.sort_projects(&mut projects, minutes);
 
         for proj in &projects {
+            if self.hidden.contains(&proj.name) {
+                continue;
+            }
             let is_expanded = self.expanded.contains(&proj.name);
             let loaded_cost = self.loaded_costs.get(&proj.name).copied().unwrap_or(0.0);
 
