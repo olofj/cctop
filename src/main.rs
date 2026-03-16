@@ -88,10 +88,11 @@ fn main() -> io::Result<()> {
     let mut app = AppState::new(window, cli.project);
     app.ingest(initial_entries);
 
-    // Initialize terminal
+    // Initialize terminal — create guard immediately so raw mode is
+    // always cleaned up, even if EnterAlternateScreen fails.
     terminal::enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
     let _guard = TerminalGuard;
+    io::stdout().execute(EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
