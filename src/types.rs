@@ -236,6 +236,7 @@ pub struct DisplayRow {
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub project: String,
+    pub model: Option<String>,
     pub session_id: Option<String>,
     pub subagent_id: Option<String>,
 }

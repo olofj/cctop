@@ -257,14 +257,15 @@ impl AppState {
         match row.kind {
             RowKind::Project => Some(Selection {
                 project: row.label.clone(),
+                model: None,
                 session_id: None,
                 subagent_id: None,
             }),
             RowKind::Model => {
-                // Model row — filter to this project + model (reuse project filter)
                 let project = self.find_parent_project(self.selected);
                 Some(Selection {
                     project,
+                    model: Some(row.model.clone()),
                     session_id: None,
                     subagent_id: None,
                 })
@@ -273,6 +274,7 @@ impl AppState {
                 let project = self.find_parent_project(self.selected);
                 Some(Selection {
                     project,
+                    model: None,
                     session_id: Some(row.label.clone()),
                     subagent_id: None,
                 })
@@ -282,6 +284,7 @@ impl AppState {
                 let session_id = self.find_parent_session(self.selected);
                 Some(Selection {
                     project,
+                    model: None,
                     session_id,
                     subagent_id: Some(row.label.clone()),
                 })
@@ -334,6 +337,11 @@ impl AppState {
 
         for e in &self.entries {
             if e.project != sel.project {
+                continue;
+            }
+            if let Some(ref model) = sel.model
+                && e.model != *model
+            {
                 continue;
             }
             if let Some(ref sid) = sel.session_id {
