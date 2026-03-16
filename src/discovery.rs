@@ -78,10 +78,10 @@ pub fn extract_project_from_path(path: &Path) -> String {
         .collect();
 
     for (i, comp) in components.iter().enumerate() {
-        if *comp == PROJECTS_DIR {
-            if let Some(project_dir) = components.get(i + 1) {
-                return decode_project_name(project_dir);
-            }
+        if *comp == PROJECTS_DIR
+            && let Some(project_dir) = components.get(i + 1)
+        {
+            return decode_project_name(project_dir);
         }
     }
     String::from("unknown")
@@ -158,7 +158,10 @@ mod tests {
 
     #[test]
     fn decode_simple_project() {
-        assert_eq!(decode_project_name("-home-olof-ccusage"), "/home/olof/ccusage");
+        assert_eq!(
+            decode_project_name("-home-olof-ccusage"),
+            "/home/olof/ccusage"
+        );
     }
 
     #[test]
@@ -199,9 +202,7 @@ mod tests {
 
     #[test]
     fn extract_subagent_none_for_main_session() {
-        let path = PathBuf::from(
-            "/home/olof/.claude/projects/-proj/a513fce4.jsonl",
-        );
+        let path = PathBuf::from("/home/olof/.claude/projects/-proj/a513fce4.jsonl");
         assert_eq!(extract_subagent_from_path(&path), None);
     }
 
@@ -215,9 +216,7 @@ mod tests {
 
     #[test]
     fn classify_main_session_file() {
-        let path = PathBuf::from(
-            "/home/olof/.claude/projects/-home-olof-cctop/a513fce4.jsonl",
-        );
+        let path = PathBuf::from("/home/olof/.claude/projects/-home-olof-cctop/a513fce4.jsonl");
         let id = classify_file(&path);
         assert_eq!(id.project, "/home/olof/cctop");
         assert_eq!(id.session_id, "a513fce4");

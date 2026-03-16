@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use chrono::{DateTime, Utc};
 
 use crate::types::{
-    BarColorMode, DisplayRow, HistBucket, RowKind, Selection, SortColumn, TokenEntry, WindowSize, MAX_RETENTION_SECS,
-    SPARKLINE_BUCKETS,
+    BarColorMode, DisplayRow, HistBucket, MAX_RETENTION_SECS, RowKind, SPARKLINE_BUCKETS,
+    Selection, SortColumn, TokenEntry, WindowSize,
 };
 
 pub struct AppState {
@@ -86,10 +86,10 @@ impl AppState {
     pub fn ingest(&mut self, entries: Vec<TokenEntry>) {
         for entry in entries {
             // Apply project filter
-            if let Some(ref filter) = self.project_filter {
-                if !entry.project.contains(filter.as_str()) {
-                    continue;
-                }
+            if let Some(ref filter) = self.project_filter
+                && !entry.project.contains(filter.as_str())
+            {
+                continue;
             }
             if !self.seen_hashes.insert(entry.dedup_key.clone()) {
                 continue;
@@ -162,7 +162,11 @@ impl AppState {
                 cost += e.cost;
             }
         }
-        (input as f64 / minutes, output as f64 / minutes, cost / minutes)
+        (
+            input as f64 / minutes,
+            output as f64 / minutes,
+            cost / minutes,
+        )
     }
 
     /// Total cost across all loaded data (within retention window).
@@ -300,8 +304,7 @@ impl AppState {
         let window_secs = self.window.as_secs() as f64;
         let bucket_secs = window_secs / num_buckets as f64;
 
-        let now_epoch =
-            now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
+        let now_epoch = now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
@@ -401,8 +404,7 @@ impl AppState {
         // Quantized bucket edges (same logic as histogram())
         let window_secs = self.window.as_secs() as f64;
         let bucket_secs = window_secs / n as f64;
-        let now_epoch =
-            now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
+        let now_epoch = now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
@@ -420,8 +422,10 @@ impl AppState {
             if in_window {
                 let idx = ((t - left_edge) / bucket_secs) as usize;
                 let idx = idx.min(n - 1);
-                let total = entry.input_tokens + entry.output_tokens
-                    + entry.cache_write_tokens + entry.cache_read_tokens;
+                let total = entry.input_tokens
+                    + entry.output_tokens
+                    + entry.cache_write_tokens
+                    + entry.cache_read_tokens;
 
                 proj.input_tokens += entry.input_tokens;
                 proj.output_tokens += entry.output_tokens;
@@ -614,9 +618,12 @@ fn smooth_buckets(buckets: &mut [HistBucket]) {
         let curr = &orig[i];
         let next = if i + 1 < n { &orig[i + 1] } else { &orig[i] };
 
-        buckets[i].input_tokens = weighted_avg(prev.input_tokens, curr.input_tokens, next.input_tokens);
-        buckets[i].output_tokens = weighted_avg(prev.output_tokens, curr.output_tokens, next.output_tokens);
-        buckets[i].cache_tokens = weighted_avg(prev.cache_tokens, curr.cache_tokens, next.cache_tokens);
+        buckets[i].input_tokens =
+            weighted_avg(prev.input_tokens, curr.input_tokens, next.input_tokens);
+        buckets[i].output_tokens =
+            weighted_avg(prev.output_tokens, curr.output_tokens, next.output_tokens);
+        buckets[i].cache_tokens =
+            weighted_avg(prev.cache_tokens, curr.cache_tokens, next.cache_tokens);
         buckets[i].cost = (prev.cost * 0.25) + (curr.cost * 0.5) + (next.cost * 0.25);
     }
 }
@@ -819,10 +826,16 @@ mod tests {
             .max_by_key(|(_, b)| b.input_tokens)
             .unwrap()
             .0;
-        assert!(max_idx >= 8, "peak should be near the end, got bucket {max_idx}");
+        assert!(
+            max_idx >= 8,
+            "peak should be near the end, got bucket {max_idx}"
+        );
         // Total should be approximately preserved (smoothing rounds u64)
         let total: u64 = buckets.iter().map(|b| b.input_tokens).sum();
-        assert!(total >= 900 && total <= 1100, "total {total} should be ~1000");
+        assert!(
+            total >= 900 && total <= 1100,
+            "total {total} should be ~1000"
+        );
     }
 
     #[test]
@@ -844,7 +857,10 @@ mod tests {
             .max_by_key(|(_, b)| b.input_tokens)
             .unwrap()
             .0;
-        assert!(max_idx <= 2, "peak should be near the start, got bucket {max_idx}");
+        assert!(
+            max_idx <= 2,
+            "peak should be near the start, got bucket {max_idx}"
+        );
     }
 
     #[test]
@@ -982,12 +998,7 @@ mod tests {
         let entries: Vec<TokenEntry> = (0..8)
             .map(|i| {
                 let age = 290 - i * 35; // spread across the window
-                make_entry(
-                    "/proj",
-                    "s1",
-                    now - chrono::Duration::seconds(age),
-                    100,
-                )
+                make_entry("/proj", "s1", now - chrono::Duration::seconds(age), 100)
             })
             .collect();
         app.ingest(entries);
@@ -996,7 +1007,10 @@ mod tests {
         assert!(!rows.is_empty());
         let nonzero = rows[0].sparkline.iter().filter(|&&v| v > 0).count();
         // Should have entries in multiple buckets (not all crammed into one)
-        assert!(nonzero >= 4, "expected entries in >=4 buckets, got {nonzero}");
+        assert!(
+            nonzero >= 4,
+            "expected entries in >=4 buckets, got {nonzero}"
+        );
     }
 
     // --- Formatting tests ---
@@ -1075,7 +1089,13 @@ mod tests {
     #[test]
     fn smooth_uniform_stays_uniform() {
         let mut buckets = vec![
-            HistBucket { input_tokens: 100, output_tokens: 0, cache_tokens: 0, cost: 0.0, ..Default::default() };
+            HistBucket {
+                input_tokens: 100,
+                output_tokens: 0,
+                cache_tokens: 0,
+                cost: 0.0,
+                ..Default::default()
+            };
             5
         ];
         smooth_buckets(&mut buckets);
@@ -1087,9 +1107,13 @@ mod tests {
 
     #[test]
     fn smooth_too_few_buckets_noop() {
-        let mut buckets = vec![
-            HistBucket { input_tokens: 1000, output_tokens: 0, cache_tokens: 0, cost: 0.0, ..Default::default() },
-        ];
+        let mut buckets = vec![HistBucket {
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_tokens: 0,
+            cost: 0.0,
+            ..Default::default()
+        }];
         smooth_buckets(&mut buckets);
         assert_eq!(buckets[0].input_tokens, 1000);
     }

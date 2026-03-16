@@ -102,10 +102,10 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                if let Some(entry) = parse_line(line.trim(), &state.identity) {
-                    if state.seen_hashes.insert(entry.dedup_key.clone()) {
-                        entries.push(entry);
-                    }
+                if let Some(entry) = parse_line(line.trim(), &state.identity)
+                    && state.seen_hashes.insert(entry.dedup_key.clone())
+                {
+                    entries.push(entry);
                 }
             }
             Err(_) => break,
@@ -165,14 +165,14 @@ fn tail_read_file(
             match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => {
-                    if let Some(entry) = parse_line(line.trim(), identity) {
-                        if entry.timestamp >= cutoff {
-                            if earliest_in_range.is_none_or(|t| entry.timestamp < t) {
-                                earliest_in_range = Some(entry.timestamp);
-                            }
-                            if seen.insert(entry.dedup_key.clone()) {
-                                entries.push(entry);
-                            }
+                    if let Some(entry) = parse_line(line.trim(), identity)
+                        && entry.timestamp >= cutoff
+                    {
+                        if earliest_in_range.is_none_or(|t| entry.timestamp < t) {
+                            earliest_in_range = Some(entry.timestamp);
+                        }
+                        if seen.insert(entry.dedup_key.clone()) {
+                            entries.push(entry);
                         }
                     }
                 }
@@ -187,7 +187,9 @@ fn tail_read_file(
 
         // If all entries we found are within range and the earliest is right at the
         // cutoff boundary, we might be missing older entries — try a larger tail
-        if earliest_in_range.is_some_and(|t| t <= cutoff + chrono::Duration::seconds(10)) && tail_bytes < file_len {
+        if earliest_in_range.is_some_and(|t| t <= cutoff + chrono::Duration::seconds(10))
+            && tail_bytes < file_len
+        {
             tail_bytes *= 2;
             continue;
         }
@@ -257,7 +259,10 @@ fn spawn_watcher(
 
         for dir in &projects_dirs {
             if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                let _ = tx.send(WatchEvent::Error(format!("Failed to watch {}: {e}", dir.display())));
+                let _ = tx.send(WatchEvent::Error(format!(
+                    "Failed to watch {}: {e}",
+                    dir.display()
+                )));
             }
         }
 
@@ -290,10 +295,10 @@ fn spawn_watcher(
                                 entries
                             };
 
-                            if !entries.is_empty() {
-                                if tx.send(WatchEvent::NewEntries(entries)).is_err() {
-                                    return; // Main thread disconnected
-                                }
+                            if !entries.is_empty()
+                                && tx.send(WatchEvent::NewEntries(entries)).is_err()
+                            {
+                                return; // Main thread disconnected
                             }
                         }
                     }

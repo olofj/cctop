@@ -4,13 +4,13 @@
 // TUI rendering with ratatui.
 
 use chrono::Utc;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
-use ratatui::Frame;
 
-use crate::app::{format_cost, format_rate, format_relative_time, format_tokens, AppState};
+use crate::app::{AppState, format_cost, format_rate, format_relative_time, format_tokens};
 use crate::types::RowKind;
 
 // --- Muted color palette (256-color indexed) ---
@@ -112,9 +112,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
         Span::raw(" ".repeat(area.width.saturating_sub(56) as usize)),
         Span::styled(
             format!("Window: [{}]", app.window.label()),
-            Style::default()
-                .fg(COL_KEY)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(COL_KEY).add_modifier(Modifier::BOLD),
         ),
     ]);
 
@@ -163,9 +161,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             let is_active = row.cost_per_min > 0.0;
 
             let base_style = if is_selected {
-                Style::default()
-                    .bg(COL_DIM)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().bg(COL_DIM).add_modifier(Modifier::BOLD)
             } else if is_active {
                 Style::default().fg(Color::White)
             } else {
@@ -344,9 +340,17 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             let color = if let Some(ref sb) = sel_buckets {
                 let sel_total = sb[col].input_tokens + sb[col].output_tokens + sb[col].cache_tokens;
                 let sel_height = (sel_total as f64 / max_tokens as f64) * sub_positions;
-                if sel_height > row_bottom { COL_HIGHLIGHT } else { COL_DIM }
+                if sel_height > row_bottom {
+                    COL_HIGHLIGHT
+                } else {
+                    COL_DIM
+                }
             } else {
-                bar_color(bucket.input_tokens, bucket.output_tokens, bucket.cache_tokens)
+                bar_color(
+                    bucket.input_tokens,
+                    bucket.output_tokens,
+                    bucket.cache_tokens,
+                )
             };
 
             spans.push(Span::styled(block.to_string(), Style::default().fg(color)));
@@ -373,10 +377,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     for (row, label) in &labels {
         let padded = format!("{:>6} ", label);
         f.render_widget(
-            Paragraph::new(Span::styled(
-                padded,
-                Style::default().fg(COL_DIM),
-            )),
+            Paragraph::new(Span::styled(padded, Style::default().fg(COL_DIM))),
             Rect {
                 x: inner.x,
                 y: chart_y + *row as u16,
@@ -502,7 +503,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
         spans.push(Span::raw(format!(" unhide({})  ", hidden)));
     }
     spans.push(Span::styled("t", Style::default().fg(COL_KEY)));
-    spans.push(Span::raw(format!(" color({})  ", app.bar_color_mode.label())));
+    spans.push(Span::raw(format!(
+        " color({})  ",
+        app.bar_color_mode.label()
+    )));
     spans.push(Span::styled("c", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(" collapse  "));
     spans.push(Span::styled("q", Style::default().fg(COL_KEY)));

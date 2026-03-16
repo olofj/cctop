@@ -13,11 +13,11 @@ use std::time::Duration;
 
 use chrono::Utc;
 use clap::Parser;
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::ExecutableCommand;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use app::AppState;
 use discovery::get_claude_paths;
@@ -81,8 +81,7 @@ fn main() -> io::Result<()> {
     }
 
     // Initial scan + start file watcher
-    let (initial_entries, watcher_rx) =
-        watcher::start(claude_paths, types::MAX_RETENTION_SECS);
+    let (initial_entries, watcher_rx) = watcher::start(claude_paths, types::MAX_RETENTION_SECS);
 
     // Build initial app state
     let mut app = AppState::new(window, cli.project);
@@ -104,55 +103,54 @@ fn main() -> io::Result<()> {
         terminal.draw(|f| ui::render(f, &mut app))?;
 
         // Poll for keyboard events
-        if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+        if event::poll(tick_rate)?
+            && let Event::Key(key) = event::read()?
+        {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
 
-                    (KeyCode::Up | KeyCode::Char('k'), _) => app.select_up(),
-                    (KeyCode::Down | KeyCode::Char('j'), _) => app.select_down(),
-                    (KeyCode::Home | KeyCode::Char('g'), _) => app.select_top(),
-                    (KeyCode::End | KeyCode::Char('G'), _) => app.select_bottom(),
-                    (KeyCode::PageUp, _) => {
-                        let page = terminal.size()?.height.saturating_sub(8) as usize;
-                        app.page_up(page);
-                    }
-                    (KeyCode::PageDown, _) => {
-                        let page = terminal.size()?.height.saturating_sub(8) as usize;
-                        app.page_down(page);
-                    }
-
-                    (KeyCode::Enter | KeyCode::Char(' '), _) => app.toggle_expand(),
-
-                    (KeyCode::Left | KeyCode::Char('h'), _) => {
-                        app.window = app.window.prev();
-                        app.invalidate();
-                    }
-                    (KeyCode::Right | KeyCode::Char('l'), _) => {
-                        app.window = app.window.next();
-                        app.invalidate();
-                    }
-
-                    (KeyCode::Char('s'), _) => {
-                        app.sort_column = app.sort_column.next();
-                        app.invalidate();
-                    }
-                    (KeyCode::Char('S'), _) => {
-                        app.sort_ascending = !app.sort_ascending;
-                        app.invalidate();
-                    }
-
-                    (KeyCode::Char('c'), _) => app.collapse_all(),
-
-                    (KeyCode::Char('d'), _) => app.hide_selected(),
-                    (KeyCode::Char('u'), _) => app.unhide_all(),
-                    (KeyCode::Char('t'), _) => {
-                        app.bar_color_mode = app.bar_color_mode.toggle();
-                    }
-
-                    _ => {}
+                (KeyCode::Up | KeyCode::Char('k'), _) => app.select_up(),
+                (KeyCode::Down | KeyCode::Char('j'), _) => app.select_down(),
+                (KeyCode::Home | KeyCode::Char('g'), _) => app.select_top(),
+                (KeyCode::End | KeyCode::Char('G'), _) => app.select_bottom(),
+                (KeyCode::PageUp, _) => {
+                    let page = terminal.size()?.height.saturating_sub(8) as usize;
+                    app.page_up(page);
                 }
+                (KeyCode::PageDown, _) => {
+                    let page = terminal.size()?.height.saturating_sub(8) as usize;
+                    app.page_down(page);
+                }
+
+                (KeyCode::Enter | KeyCode::Char(' '), _) => app.toggle_expand(),
+
+                (KeyCode::Left | KeyCode::Char('h'), _) => {
+                    app.window = app.window.prev();
+                    app.invalidate();
+                }
+                (KeyCode::Right | KeyCode::Char('l'), _) => {
+                    app.window = app.window.next();
+                    app.invalidate();
+                }
+
+                (KeyCode::Char('s'), _) => {
+                    app.sort_column = app.sort_column.next();
+                    app.invalidate();
+                }
+                (KeyCode::Char('S'), _) => {
+                    app.sort_ascending = !app.sort_ascending;
+                    app.invalidate();
+                }
+
+                (KeyCode::Char('c'), _) => app.collapse_all(),
+                (KeyCode::Char('d'), _) => app.hide_selected(),
+                (KeyCode::Char('u'), _) => app.unhide_all(),
+                (KeyCode::Char('t'), _) => {
+                    app.bar_color_mode = app.bar_color_mode.toggle();
+                }
+
+                _ => {}
             }
         }
 

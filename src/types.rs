@@ -246,7 +246,11 @@ impl Selection {
         } else if let Some(ref sid) = self.session_id {
             sid.clone()
         } else {
-            self.project.rsplit('/').next().unwrap_or(&self.project).to_string()
+            self.project
+                .rsplit('/')
+                .next()
+                .unwrap_or(&self.project)
+                .to_string()
         }
     }
 }
