@@ -153,6 +153,13 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
 
     let wide = area.width >= 100;
 
+    // Global sparkline max so all rows are scaled consistently
+    let sparkline_max = rows_data
+        .iter()
+        .flat_map(|r| r.sparkline.iter().copied())
+        .max()
+        .unwrap_or(0);
+
     let table_rows: Vec<Row> = rows_data
         .iter()
         .enumerate()
@@ -189,7 +196,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
 
             let model_display = truncate(&row.model, 14);
 
-            let spark = render_sparkline(&row.sparkline, is_active);
+            let spark = render_sparkline(&row.sparkline, sparkline_max, is_active);
 
             let cells = vec![
                 Cell::from(display_label),
@@ -527,9 +534,13 @@ fn cost_color(cost_per_min: f64) -> Color {
 }
 
 /// Render a sparkline array into a styled Line with block chars.
-fn render_sparkline(data: &[u64; crate::types::SPARKLINE_BUCKETS], active: bool) -> Line<'static> {
-    let max = data.iter().copied().max().unwrap_or(0);
-    if max == 0 {
+/// `global_max` is the max across all rows so sparklines are comparable.
+fn render_sparkline(
+    data: &[u64; crate::types::SPARKLINE_BUCKETS],
+    global_max: u64,
+    active: bool,
+) -> Line<'static> {
+    if global_max == 0 {
         let s: String = BLOCKS[0].to_string().repeat(data.len());
         return Line::from(Span::styled(s, Style::default().fg(COL_DIM)));
     }
@@ -537,13 +548,12 @@ fn render_sparkline(data: &[u64; crate::types::SPARKLINE_BUCKETS], active: bool)
     let spans: Vec<Span> = data
         .iter()
         .map(|&v| {
-            // Map value to block index 1..=8 (0 only for true zero)
             let idx = if v == 0 {
                 0
             } else {
-                ((v as f64 / max as f64) * 7.0) as usize + 1
+                ((v as f64 / global_max as f64) * 7.0) as usize + 1
             };
-            Span::styled(BLOCKS[idx].to_string(), Style::default().fg(color))
+            Span::styled(BLOCKS[idx.min(8)].to_string(), Style::default().fg(color))
         })
         .collect();
     Line::from(spans)
