@@ -481,11 +481,8 @@ fn dominant_model(model_costs: &HashMap<String, f64>) -> String {
 }
 
 fn short_id(id: &str) -> String {
-    if id.len() > 12 {
-        id[..12].to_string()
-    } else {
-        id.to_string()
-    }
+    let s: String = id.chars().take(12).collect();
+    s
 }
 
 // --- Internal aggregation structs ---

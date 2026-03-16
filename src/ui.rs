@@ -13,6 +13,18 @@ use ratatui::Frame;
 use crate::app::{format_cost, format_rate, format_relative_time, format_tokens, AppState};
 use crate::types::RowKind;
 
+/// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
+/// Safe for multi-byte UTF-8.
+fn truncate(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars.saturating_sub(1)).collect();
+    if chars.next().is_some() {
+        format!("{}…", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
 const HEADER_HEIGHT: u16 = 3;
 const FOOTER_HEIGHT: u16 = 1;
 const MIN_GRAPH_HEIGHT: u16 = 6;
@@ -154,12 +166,8 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             };
             let label = format!("{}{} {}", indent, expand_indicator, row.label);
 
-            let max_label_width = if wide { 30 } else { 20 };
-            let display_label = if label.len() > max_label_width {
-                format!("{}…", &label[..max_label_width - 1])
-            } else {
-                label
-            };
+            let max_label_chars = if wide { 30 } else { 20 };
+            let display_label = truncate(&label, max_label_chars);
 
             let sessions_str = if row.kind == RowKind::Project {
                 format!("{}", row.session_count)
@@ -167,11 +175,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
                 String::new()
             };
 
-            let model_display = if row.model.len() > 14 {
-                format!("{}…", &row.model[..13])
-            } else {
-                row.model.clone()
-            };
+            let model_display = truncate(&row.model, 14);
 
             let spark = render_sparkline(&row.sparkline, is_active);
 
