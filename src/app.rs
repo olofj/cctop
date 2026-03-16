@@ -613,6 +613,9 @@ fn f64_cmp(a: f64, b: f64) -> std::cmp::Ordering {
 }
 
 fn dominant_model(model_costs: &HashMap<String, f64>) -> String {
+    if model_costs.len() > 1 {
+        return "mixed".to_string();
+    }
     model_costs
         .iter()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
