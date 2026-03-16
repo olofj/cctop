@@ -244,7 +244,7 @@ impl AppState {
                 subagent_id: None,
             }),
             RowKind::Session => {
-                let project = row.tree_key.split('/').next().unwrap_or("").to_string();
+                let project = self.find_parent_project(self.selected);
                 Some(Selection {
                     project,
                     session_id: Some(row.label.clone()),
@@ -252,22 +252,8 @@ impl AppState {
                 })
             }
             RowKind::Subagent => {
-                // tree_key is empty for subagents, so walk backward through rows
-                // to find the parent session and project.
-                let mut session_id = None;
-                let mut project = String::new();
-                for i in (0..self.selected).rev() {
-                    let parent = &self.rows_cache[i];
-                    if parent.kind == RowKind::Session && session_id.is_none() {
-                        session_id = Some(parent.label.clone());
-                        project = parent.tree_key.split('/').next().unwrap_or("").to_string();
-                        break;
-                    }
-                    if parent.kind == RowKind::Project {
-                        project = parent.label.clone();
-                        break;
-                    }
-                }
+                let project = self.find_parent_project(self.selected);
+                let session_id = self.find_parent_session(self.selected);
                 Some(Selection {
                     project,
                     session_id,
@@ -275,6 +261,29 @@ impl AppState {
                 })
             }
         }
+    }
+
+    /// Walk backward through rows to find the parent Project label.
+    fn find_parent_project(&self, from: usize) -> String {
+        for i in (0..from).rev() {
+            if self.rows_cache[i].kind == RowKind::Project {
+                return self.rows_cache[i].label.clone();
+            }
+        }
+        String::new()
+    }
+
+    /// Walk backward through rows to find the parent Session label.
+    fn find_parent_session(&self, from: usize) -> Option<String> {
+        for i in (0..from).rev() {
+            if self.rows_cache[i].kind == RowKind::Session {
+                return Some(self.rows_cache[i].label.clone());
+            }
+            if self.rows_cache[i].kind == RowKind::Project {
+                break;
+            }
+        }
+        None
     }
 
     /// Compute a filtered histogram showing only the selected entity's contribution.
