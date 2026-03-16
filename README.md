@@ -39,13 +39,28 @@ like htop, but for your Claude Code spend.
   fast-mode multipliers
 - **Keyboard-driven**: vim-style navigation (hjkl), sort cycling, collapse all
 
+## Prerequisites
+
+- **Rust toolchain** (1.85+ for edition 2024) -- install via [rustup](https://rustup.rs/)
+- **Claude Code** installed and used at least once (cctop reads its session
+  files from `~/.claude/projects/`)
+- **Linux** (uses inotify for file watching; macOS support via kqueue is
+  untested but may work through the `notify` crate)
+
 ## Installation
 
+### From source (recommended)
+
 ```sh
+git clone https://github.com/olofj/cctop
+cd cctop
 cargo install --path .
 ```
 
-Or build from source:
+This installs the `cctop` binary to `~/.cargo/bin/`, which should be in your
+`PATH` if you installed Rust via rustup.
+
+### Build without installing
 
 ```sh
 git clone https://github.com/olofj/cctop
@@ -54,18 +69,73 @@ cargo build --release
 # Binary at ./target/release/cctop
 ```
 
-## Usage
+You can copy or symlink the binary wherever you like:
 
 ```sh
-# Default: 5-minute window
-cctop
+cp target/release/cctop ~/.local/bin/
+```
 
-# Start with a 1-hour window
+## Usage
+
+Just run `cctop` while Claude Code is active in another terminal:
+
+```sh
+cctop
+```
+
+It will immediately show all projects with token activity from the last 24
+hours, and update live as new API responses come in.
+
+### Command-line options
+
+```
+cctop [OPTIONS]
+
+Options:
+  -w, --window <WINDOW>    Initial time window [default: 5m]
+                           Values: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
+  -p, --project <PROJECT>  Filter to projects matching this substring
+      --list-projects      List all discovered projects and exit
+      --tick-rate <MS>     UI refresh interval in milliseconds [default: 250]
+  -h, --help               Print help
+  -V, --version            Print version
+```
+
+### Examples
+
+```sh
+# Monitor with a 1-hour window
 cctop -w 1h
 
-# Filter to a specific project
-cctop -p myproject
+# Only show projects with "myapp" in the path
+cctop -p myapp
+
+# See what projects Claude Code knows about
+cctop --list-projects
+
+# Full day view
+cctop -w 24h
 ```
+
+### Reading the display
+
+The top half shows a **table** with one row per project:
+
+- **PROJECT** -- decoded filesystem path of the project
+- **TREND** -- sparkline of token activity over the window (oldest left, newest right)
+- **SESS** -- number of active sessions in the window
+- **MODEL** -- the model consuming the most cost in the window
+- **IN/min** -- input tokens per minute (prompt tokens sent to the API)
+- **OUT/min** -- output tokens per minute (response tokens from the API)
+- **$/min** -- estimated cost per minute based on the model pricing table
+- **$TOTAL** -- total cost for this project across all loaded data
+- **LAST** -- time since the last API response
+
+The bottom half shows a **histogram** of total token activity over the window,
+color-coded by token type (green = input, blue = output, magenta = cache).
+
+Projects can be **expanded** with Enter to show individual sessions, and
+sessions can be expanded further to show subagent activity.
 
 ### Keyboard shortcuts
 
@@ -77,11 +147,12 @@ cctop -p myproject
 | `←` `→` / `h` `l` | Shrink/grow time window |
 | `s` | Cycle sort column ($/min, IN/min, OUT/min, Last, Project) |
 | `S` | Reverse sort direction |
-| `d` | Hide selected project |
+| `d` | Hide selected project from the table |
 | `u` | Unhide all hidden projects |
 | `c` | Collapse all expanded rows |
 | `g` / `G` | Jump to top/bottom |
 | `PgUp` / `PgDn` | Scroll by page |
+| `Ctrl-C` | Quit |
 
 ## How it works
 
