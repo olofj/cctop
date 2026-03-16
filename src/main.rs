@@ -147,6 +147,9 @@ fn main() -> io::Result<()> {
 
                     (KeyCode::Char('d'), _) => app.hide_selected(),
                     (KeyCode::Char('u'), _) => app.unhide_all(),
+                    (KeyCode::Char('t'), _) => {
+                        app.bar_color_mode = app.bar_color_mode.toggle();
+                    }
 
                     _ => {}
                 }

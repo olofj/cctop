@@ -13,6 +13,24 @@ use ratatui::Frame;
 use crate::app::{format_cost, format_rate, format_relative_time, format_tokens, AppState};
 use crate::types::RowKind;
 
+// --- Muted color palette (256-color indexed) ---
+/// Soft blue for input tokens and general accent.
+const COL_INPUT: Color = Color::Indexed(67); // #5f87af — steel blue
+/// Muted teal for output tokens.
+const COL_OUTPUT: Color = Color::Indexed(109); // #87afaf — grayish teal
+/// Dim gray for cache tokens.
+const COL_CACHE: Color = Color::Indexed(243); // #767676 — medium gray
+/// Highlighted selection in the graph.
+const COL_HIGHLIGHT: Color = Color::Indexed(75); // #5fafff — soft bright blue
+/// Dimmed bars in the graph (non-selected).
+const COL_DIM: Color = Color::Indexed(239); // #4e4e4e — dark gray
+/// Accent color for headings and titles.
+const COL_ACCENT: Color = Color::Indexed(67); // steel blue (same as input)
+/// Muted yellow for keybinding hints.
+const COL_KEY: Color = Color::Indexed(179); // #d7af5f — warm muted yellow
+/// Sparkline active color.
+const COL_SPARK: Color = Color::Indexed(109); // grayish teal
+
 /// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
 /// Safe for multi-byte UTF-8.
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -78,9 +96,9 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
     let title_line = Line::from(vec![
         Span::styled(
             " cctop ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("─", Style::default().fg(Color::DarkGray)),
+        Span::styled("─", Style::default().fg(COL_DIM)),
         Span::raw(" "),
         Span::styled(
             format!("{} tok/min", format_rate(total_rate)),
@@ -95,7 +113,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
         Span::styled(
             format!("Window: [{}]", app.window.label()),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(COL_KEY)
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
@@ -133,7 +151,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         Cell::from("$TOTAL").style(hdr),
         Cell::from("LAST").style(hdr),
     ];
-    let header = Row::new(header_cells).style(Style::default().fg(Color::Cyan));
+    let header = Row::new(header_cells).style(Style::default().fg(COL_ACCENT));
 
     let wide = area.width >= 100;
 
@@ -146,7 +164,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
 
             let base_style = if is_selected {
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(COL_DIM)
                     .add_modifier(Modifier::BOLD)
             } else if is_active {
                 Style::default().fg(Color::White)
@@ -226,9 +244,9 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         .block(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(COL_DIM)),
         )
-        .row_highlight_style(Style::default().bg(Color::DarkGray))
+        .row_highlight_style(Style::default().bg(COL_DIM))
         .highlight_symbol("│");
 
     f.render_widget(table, area);
@@ -237,10 +255,10 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
 fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(COL_DIM))
         .title(Span::styled(
             " Token Activity ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
@@ -276,7 +294,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         let msg = "No activity in window";
         let x = inner.x + (inner.width.saturating_sub(msg.len() as u16)) / 2;
         let y = inner.y + inner.height / 2;
-        let empty = Paragraph::new(Span::styled(msg, Style::default().fg(Color::DarkGray)));
+        let empty = Paragraph::new(Span::styled(msg, Style::default().fg(COL_DIM)));
         f.render_widget(
             empty,
             Rect {
@@ -289,44 +307,49 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         return;
     }
 
-    // Scale factor: each character height = max_tokens / (chart_height * 8) tokens
-    // (8 sub-positions per character using block chars)
-    let sub_positions = (chart_height * 8) as f64;
+    let color_mode = app.bar_color_mode;
+    let selection = if color_mode == crate::types::BarColorMode::Selected {
+        app.selected_filter()
+    } else {
+        None
+    };
 
-    // Build chart lines (top to bottom)
+    // In Selected mode, compute a second histogram filtered to the selection
+    let sel_buckets = selection
+        .as_ref()
+        .map(|sel| app.histogram_filtered(now, chart_width, sel));
+
+    let sub_positions = (chart_height * 8) as f64;
     let chart_x = inner.x + y_label_width;
     let chart_y = inner.y;
 
     for row in 0..chart_height {
         let mut spans: Vec<Span> = Vec::with_capacity(chart_width);
 
-        for bucket in &buckets {
+        for (col, bucket) in buckets.iter().enumerate() {
             let total = bucket.input_tokens + bucket.output_tokens + bucket.cache_tokens;
-            let bar_height = (total as f64 / max_tokens as f64) * sub_positions;
+            let total_height = (total as f64 / max_tokens as f64) * sub_positions;
 
-            // This row covers sub-positions from top
             let row_from_bottom = chart_height - 1 - row;
             let row_bottom = (row_from_bottom * 8) as f64;
             let row_top = row_bottom + 8.0;
 
-            if bar_height <= row_bottom {
-                // Bar doesn't reach this row
+            if total_height <= row_bottom {
                 spans.push(Span::raw(" "));
-            } else if bar_height >= row_top {
-                // Bar completely fills this row — color by dominant component
-                let color = bar_color(bucket.input_tokens, bucket.output_tokens, bucket.cache_tokens);
-                spans.push(Span::styled("█", Style::default().fg(color)));
-            } else {
-                // Partial fill
-                let fill = ((bar_height - row_bottom) / 8.0 * 8.0) as usize;
-                let fill = fill.min(8);
-                let ch = BLOCKS[fill];
-                let color = bar_color(bucket.input_tokens, bucket.output_tokens, bucket.cache_tokens);
-                spans.push(Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(color),
-                ));
+                continue;
             }
+
+            let block = block_char(total_height, row_bottom, row_top);
+
+            let color = if let Some(ref sb) = sel_buckets {
+                let sel_total = sb[col].input_tokens + sb[col].output_tokens + sb[col].cache_tokens;
+                let sel_height = (sel_total as f64 / max_tokens as f64) * sub_positions;
+                if sel_height > row_bottom { COL_HIGHLIGHT } else { COL_DIM }
+            } else {
+                bar_color(bucket.input_tokens, bucket.output_tokens, bucket.cache_tokens)
+            };
+
+            spans.push(Span::styled(block.to_string(), Style::default().fg(color)));
         }
 
         let line = Line::from(spans);
@@ -352,7 +375,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         f.render_widget(
             Paragraph::new(Span::styled(
                 padded,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(COL_DIM),
             )),
             Rect {
                 x: inner.x,
@@ -380,21 +403,33 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             x_line.replace_range(start..end, &label[..end - start]);
         }
 
-        // Legend on the right side of the X-axis
-        let legend = " ■in ■out ■cache";
-        let remaining = inner.width as usize - y_label_width as usize - x_line.len();
-
         let mut spans = vec![
             Span::raw(" ".repeat(y_label_width as usize)),
-            Span::styled(x_line, Style::default().fg(Color::DarkGray)),
+            Span::styled(x_line, Style::default().fg(COL_DIM)),
         ];
-        if remaining >= legend.len() || inner.width as usize > chart_width + y_label_width as usize + 16 {
-            spans.push(Span::styled(" ■", Style::default().fg(Color::Green)));
-            spans.push(Span::styled("in", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(" ■", Style::default().fg(Color::Blue)));
-            spans.push(Span::styled("out", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(" ■", Style::default().fg(Color::Magenta)));
-            spans.push(Span::styled("cache", Style::default().fg(Color::DarkGray)));
+
+        // Legend depends on color mode
+        let has_room = inner.width as usize > chart_width + y_label_width as usize + 16;
+        if has_room {
+            match color_mode {
+                crate::types::BarColorMode::TokenType => {
+                    spans.push(Span::styled(" ■", Style::default().fg(COL_INPUT)));
+                    spans.push(Span::styled("in", Style::default().fg(COL_DIM)));
+                    spans.push(Span::styled(" ■", Style::default().fg(COL_OUTPUT)));
+                    spans.push(Span::styled("out", Style::default().fg(COL_DIM)));
+                    spans.push(Span::styled(" ■", Style::default().fg(COL_CACHE)));
+                    spans.push(Span::styled("cache", Style::default().fg(COL_DIM)));
+                }
+                crate::types::BarColorMode::Selected => {
+                    if let Some(ref sel) = selection {
+                        let short = truncate(&sel.display_name(), 12);
+                        spans.push(Span::styled(" ■", Style::default().fg(COL_HIGHLIGHT)));
+                        spans.push(Span::styled(short, Style::default().fg(COL_DIM)));
+                        spans.push(Span::styled(" ■", Style::default().fg(COL_DIM)));
+                        spans.push(Span::styled("other", Style::default().fg(COL_DIM)));
+                    }
+                }
+            }
         }
 
         f.render_widget(
@@ -409,14 +444,24 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     }
 }
 
+/// Pick the block character for a bar at the given row position.
+fn block_char(bar_height: f64, row_bottom: f64, row_top: f64) -> char {
+    if bar_height >= row_top {
+        '█'
+    } else {
+        let fill = ((bar_height - row_bottom) / 8.0 * 8.0) as usize;
+        BLOCKS[fill.min(8)]
+    }
+}
+
 /// Pick bar color based on which token type dominates the bucket.
 fn bar_color(input: u64, output: u64, cache: u64) -> Color {
     if input >= output && input >= cache {
-        Color::Green
+        COL_INPUT
     } else if output >= cache {
-        Color::Blue
+        COL_OUTPUT
     } else {
-        Color::Magenta
+        COL_CACHE
     }
 }
 
@@ -441,24 +486,26 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
     let hidden = app.hidden_count();
 
     let mut spans = vec![
-        Span::styled(" ↑↓", Style::default().fg(Color::Yellow)),
+        Span::styled(" ↑↓", Style::default().fg(COL_KEY)),
         Span::raw(" nav  "),
-        Span::styled("←→", Style::default().fg(Color::Yellow)),
+        Span::styled("←→", Style::default().fg(COL_KEY)),
         Span::raw(" window  "),
-        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::styled("Enter", Style::default().fg(COL_KEY)),
         Span::raw(" expand  "),
-        Span::styled("s", Style::default().fg(Color::Yellow)),
+        Span::styled("s", Style::default().fg(COL_KEY)),
         Span::raw(format!(" sort({})  ", sort_label)),
-        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::styled("d", Style::default().fg(COL_KEY)),
         Span::raw(" hide  "),
     ];
     if hidden > 0 {
-        spans.push(Span::styled("u", Style::default().fg(Color::Yellow)));
+        spans.push(Span::styled("u", Style::default().fg(COL_KEY)));
         spans.push(Span::raw(format!(" unhide({})  ", hidden)));
     }
-    spans.push(Span::styled("c", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("t", Style::default().fg(COL_KEY)));
+    spans.push(Span::raw(format!(" color({})  ", app.bar_color_mode.label())));
+    spans.push(Span::styled("c", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(" collapse  "));
-    spans.push(Span::styled("q", Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("q", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(" quit"));
 
     let footer = Paragraph::new(Line::from(spans));
@@ -467,11 +514,11 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
 
 fn cost_color(cost_per_min: f64) -> Color {
     if cost_per_min < 0.01 {
-        Color::Green
+        Color::Indexed(108) // muted green
     } else if cost_per_min < 0.50 {
-        Color::Yellow
+        COL_KEY
     } else {
-        Color::Red
+        Color::Indexed(167) // muted red
     }
 }
 
@@ -480,9 +527,9 @@ fn render_sparkline(data: &[u64; crate::types::SPARKLINE_BUCKETS], active: bool)
     let max = data.iter().copied().max().unwrap_or(0);
     if max == 0 {
         let s: String = BLOCKS[0].to_string().repeat(data.len());
-        return Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)));
+        return Line::from(Span::styled(s, Style::default().fg(COL_DIM)));
     }
-    let color = if active { Color::Cyan } else { Color::DarkGray };
+    let color = if active { COL_SPARK } else { COL_DIM };
     let spans: Vec<Span> = data
         .iter()
         .map(|&v| {
@@ -500,11 +547,11 @@ fn render_sparkline(data: &[u64; crate::types::SPARKLINE_BUCKETS], active: bool)
 
 fn rate_color(tokens_per_min: f64) -> Color {
     if tokens_per_min < 1_000.0 {
-        Color::Green
+        Color::Indexed(108) // muted green
     } else if tokens_per_min < 50_000.0 {
-        Color::Yellow
+        COL_KEY
     } else {
-        Color::Red
+        Color::Indexed(167) // muted red
     }
 }
 

@@ -231,10 +231,56 @@ pub struct DisplayRow {
 }
 
 /// One time-bucket for the histogram.
+/// What's currently selected in the table — used for histogram filtering.
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub project: String,
+    pub session_id: Option<String>,
+    pub subagent_id: Option<String>,
+}
+
+impl Selection {
+    pub fn display_name(&self) -> String {
+        if let Some(ref aid) = self.subagent_id {
+            aid.clone()
+        } else if let Some(ref sid) = self.session_id {
+            sid.clone()
+        } else {
+            self.project.rsplit('/').next().unwrap_or(&self.project).to_string()
+        }
+    }
+}
+
+/// One time-bucket for the histogram.
 #[derive(Debug, Clone, Default)]
 pub struct HistBucket {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_tokens: u64,
     pub cost: f64,
+}
+
+/// How to color the histogram bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarColorMode {
+    /// Color by dominant token type (input/output/cache).
+    TokenType,
+    /// Highlight the selected project's contribution against dimmed total.
+    Selected,
+}
+
+impl BarColorMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::TokenType => Self::Selected,
+            Self::Selected => Self::TokenType,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TokenType => "all",
+            Self::Selected => "selected",
+        }
+    }
 }

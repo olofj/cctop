@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use chrono::{DateTime, Utc};
 
 use crate::types::{
-    DisplayRow, HistBucket, RowKind, SortColumn, TokenEntry, WindowSize, MAX_RETENTION_SECS,
+    BarColorMode, DisplayRow, HistBucket, RowKind, Selection, SortColumn, TokenEntry, WindowSize, MAX_RETENTION_SECS,
     SPARKLINE_BUCKETS,
 };
 
@@ -43,6 +43,9 @@ pub struct AppState {
     /// Expanded tree keys (project paths and "project/session" keys).
     expanded: HashSet<String>,
 
+    /// How to color histogram bars.
+    pub bar_color_mode: BarColorMode,
+
     /// Hidden project names.
     hidden: HashSet<String>,
 
@@ -70,6 +73,7 @@ impl AppState {
             selected: 0,
             scroll_offset: 0,
             expanded: HashSet::new(),
+            bar_color_mode: BarColorMode::TokenType,
             hidden: HashSet::new(),
             project_filter,
             status: None,
@@ -229,22 +233,111 @@ impl AppState {
         self.cache_dirty = true;
     }
 
+    /// Get filter criteria for the currently selected row.
+    /// Returns (project, optional session_id, optional subagent_id).
+    pub fn selected_filter(&self) -> Option<Selection> {
+        let row = self.rows_cache.get(self.selected)?;
+        match row.kind {
+            RowKind::Project => Some(Selection {
+                project: row.label.clone(),
+                session_id: None,
+                subagent_id: None,
+            }),
+            RowKind::Session => {
+                let project = row.tree_key.split('/').next().unwrap_or("").to_string();
+                Some(Selection {
+                    project,
+                    session_id: Some(row.label.clone()),
+                    subagent_id: None,
+                })
+            }
+            RowKind::Subagent => {
+                // tree_key is empty for subagents, so walk backward through rows
+                // to find the parent session and project.
+                let mut session_id = None;
+                let mut project = String::new();
+                for i in (0..self.selected).rev() {
+                    let parent = &self.rows_cache[i];
+                    if parent.kind == RowKind::Session && session_id.is_none() {
+                        session_id = Some(parent.label.clone());
+                        project = parent.tree_key.split('/').next().unwrap_or("").to_string();
+                        break;
+                    }
+                    if parent.kind == RowKind::Project {
+                        project = parent.label.clone();
+                        break;
+                    }
+                }
+                Some(Selection {
+                    project,
+                    session_id,
+                    subagent_id: Some(row.label.clone()),
+                })
+            }
+        }
+    }
+
+    /// Compute a filtered histogram showing only the selected entity's contribution.
+    /// Uses the same quantized bucketing and smoothing as `histogram()`.
+    pub fn histogram_filtered(
+        &self,
+        now: DateTime<Utc>,
+        num_buckets: usize,
+        sel: &Selection,
+    ) -> Vec<HistBucket> {
+        if num_buckets == 0 {
+            return Vec::new();
+        }
+        let window_secs = self.window.as_secs() as f64;
+        let bucket_secs = window_secs / num_buckets as f64;
+
+        let now_epoch =
+            now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
+        let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
+        let left_edge = right_edge - window_secs;
+
+        let mut buckets = vec![HistBucket::default(); num_buckets];
+
+        for e in &self.entries {
+            if e.project != sel.project {
+                continue;
+            }
+            if let Some(ref sid) = sel.session_id {
+                // Session IDs in entries are full UUIDs; display rows use short_id (12 chars).
+                // Match if the entry's session_id starts with the short ID.
+                if !e.session_id.starts_with(sid.as_str()) {
+                    continue;
+                }
+            }
+            if let Some(ref aid) = sel.subagent_id {
+                match &e.subagent_id {
+                    Some(entry_aid) if entry_aid.starts_with(aid.as_str()) => {}
+                    _ => continue,
+                }
+            }
+
+            let t = e.timestamp.timestamp() as f64
+                + e.timestamp.timestamp_subsec_millis() as f64 / 1000.0;
+            if t < left_edge || t >= right_edge {
+                continue;
+            }
+            let idx = ((t - left_edge) / bucket_secs) as usize;
+            let idx = idx.min(num_buckets - 1);
+            buckets[idx].input_tokens += e.input_tokens;
+            buckets[idx].output_tokens += e.output_tokens;
+            buckets[idx].cache_tokens += e.cache_write_tokens + e.cache_read_tokens;
+            buckets[idx].cost += e.cost;
+        }
+
+        smooth_buckets(&mut buckets);
+        buckets
+    }
+
     /// Hide the project of the currently selected row.
     pub fn hide_selected(&mut self) {
-        if let Some(row) = self.rows_cache.get(self.selected) {
-            // Find the project name: for project rows it's the label,
-            // for session/subagent rows walk up via tree_key.
-            let project = match row.kind {
-                RowKind::Project => row.label.clone(),
-                _ => {
-                    // tree_key is "project/session" — extract project part
-                    row.tree_key.split('/').next().unwrap_or("").to_string()
-                }
-            };
-            if !project.is_empty() {
-                self.hidden.insert(project);
-                self.cache_dirty = true;
-            }
+        if let Some(sel) = self.selected_filter() {
+            self.hidden.insert(sel.project);
+            self.cache_dirty = true;
         }
     }
 
@@ -973,7 +1066,7 @@ mod tests {
     #[test]
     fn smooth_uniform_stays_uniform() {
         let mut buckets = vec![
-            HistBucket { input_tokens: 100, output_tokens: 0, cache_tokens: 0, cost: 0.0 };
+            HistBucket { input_tokens: 100, output_tokens: 0, cache_tokens: 0, cost: 0.0, ..Default::default() };
             5
         ];
         smooth_buckets(&mut buckets);
@@ -986,7 +1079,7 @@ mod tests {
     #[test]
     fn smooth_too_few_buckets_noop() {
         let mut buckets = vec![
-            HistBucket { input_tokens: 1000, output_tokens: 0, cache_tokens: 0, cost: 0.0 },
+            HistBucket { input_tokens: 1000, output_tokens: 0, cache_tokens: 0, cost: 0.0, ..Default::default() },
         ];
         smooth_buckets(&mut buckets);
         assert_eq!(buckets[0].input_tokens, 1000);
