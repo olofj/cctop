@@ -2,6 +2,8 @@
 name = "cctop"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Live htop-style terminal monitor for Claude Code token usage"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
