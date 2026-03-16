@@ -563,34 +563,51 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn render_help(f: &mut Frame, area: Rect) {
+    // High-contrast colors for the overlay
+    let bg = Color::Indexed(235); // #262626 — very dark gray
+    let fg = Color::Indexed(252); // #d0d0d0 — light gray
+    let key_fg = Color::Indexed(222); // #ffd787 — warm yellow, bright
+    let title_fg = Color::Indexed(117); // #87d7ff — bright blue
+    let dim_fg = Color::Indexed(245); // #8a8a8a — medium gray
+
+    let mk_help = |key: &'static str, desc: &'static str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {:14}", key), Style::default().fg(key_fg).bg(bg)),
+            Span::styled(desc, Style::default().fg(fg).bg(bg)),
+        ])
+    };
+
     let help_lines = vec![
         Line::from(Span::styled(
             " cctop — Keyboard Shortcuts ",
-            Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(title_fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::raw(""),
-        help_line("↑↓  j/k", "Navigate rows"),
-        help_line("Enter  Space", "Expand/collapse selected row"),
-        help_line("←→  h/l", "Shrink/grow time window"),
-        help_line("g / G", "Jump to top / bottom"),
-        help_line("PgUp / PgDn", "Scroll by page"),
-        Line::raw(""),
-        help_line("s", "Cycle sort column"),
-        help_line("S", "Reverse sort direction"),
-        help_line("v", "Toggle view (project / model)"),
-        help_line("t", "Toggle graph highlight (all / selected)"),
-        help_line("m", "Toggle graph metric ($ / tokens)"),
-        Line::raw(""),
-        help_line("d", "Hide selected project"),
-        help_line("u", "Unhide all hidden projects"),
-        help_line("c", "Collapse all expanded rows"),
-        Line::raw(""),
-        help_line("q  Esc", "Quit"),
-        help_line("?", "Toggle this help"),
-        Line::raw(""),
+        Line::styled("", Style::default().bg(bg)),
+        mk_help("↑↓  j/k", "Navigate rows"),
+        mk_help("Enter  Space", "Expand/collapse selected row"),
+        mk_help("←→  h/l", "Shrink/grow time window"),
+        mk_help("g / G", "Jump to top / bottom"),
+        mk_help("PgUp / PgDn", "Scroll by page"),
+        Line::styled("", Style::default().bg(bg)),
+        mk_help("s", "Cycle sort column"),
+        mk_help("S", "Reverse sort direction"),
+        mk_help("v", "Toggle view (project / model)"),
+        mk_help("t", "Toggle highlight (all / selected)"),
+        mk_help("m", "Toggle graph metric ($ / tokens)"),
+        Line::styled("", Style::default().bg(bg)),
+        mk_help("d", "Hide selected project"),
+        mk_help("u", "Unhide all hidden projects"),
+        mk_help("c", "Collapse all expanded rows"),
+        Line::styled("", Style::default().bg(bg)),
+        mk_help("q  Esc", "Quit"),
+        mk_help("?", "Toggle this help"),
+        Line::styled("", Style::default().bg(bg)),
         Line::from(Span::styled(
             " Press any key to close ",
-            Style::default().fg(COL_DIM),
+            Style::default().fg(dim_fg).bg(bg),
         )),
     ];
 
@@ -611,18 +628,11 @@ fn render_help(f: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(COL_ACCENT).bg(Color::Black))
-        .style(Style::default().fg(Color::White).bg(Color::Black));
+        .border_style(Style::default().fg(title_fg).bg(bg))
+        .style(Style::default().fg(fg).bg(bg));
 
     let help = Paragraph::new(help_lines).block(block);
     f.render_widget(help, popup_area);
-}
-
-fn help_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(format!("  {:14}", key), Style::default().fg(COL_KEY)),
-        Span::raw(desc),
-    ])
 }
 
 fn cost_color(cost_per_min: f64) -> Color {
