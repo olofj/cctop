@@ -1,13 +1,13 @@
 # cctop
 
-Live, htop-style terminal monitor for Claude Code token usage.
+Live terminal monitor for Claude Code token usage.
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 cctop watches Claude Code's session JSONL files in real-time and displays
 per-project token rates, costs, and activity trends in an interactive TUI --
-like htop, but for your Claude Code spend.
+think top(1) for your Claude Code spend.
 
 ```
  cctop ─ Claude Code Token Monitor                   Window: [5m]

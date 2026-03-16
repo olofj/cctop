@@ -24,7 +24,7 @@ use discovery::get_claude_paths;
 use types::WindowSize;
 
 #[derive(Parser)]
-#[command(name = "cctop", about = "Live htop-style Claude Code token monitor", version)]
+#[command(name = "cctop", about = "Live Claude Code token monitor", version)]
 struct Cli {
     /// Initial time window (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h)
     #[arg(short, long, default_value = "5m")]
