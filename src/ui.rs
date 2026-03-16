@@ -153,6 +153,17 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
 
     let wide = area.width >= 100;
 
+    // Compute actual PROJECT column width: total minus fixed columns
+    let spark_width = crate::types::SPARKLINE_BUCKETS as u16;
+    let fixed_cols: u16 = spark_width
+        + if wide {
+            4 + 15 + 8 + 8 + 8 + 8 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
+        } else {
+            4 + 12 + 7 + 7 + 7 + 7 + 7
+        }
+        + 3; // table borders/padding
+    let project_col_width = area.width.saturating_sub(fixed_cols) as usize;
+
     // Global sparkline max so all rows are scaled consistently
     let sparkline_max = rows_data
         .iter()
@@ -183,8 +194,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             };
             let label = format!("{}{} {}", indent, expand_indicator, row.label);
 
-            let max_label_chars = if wide { 30 } else { 20 };
-            let display_label = truncate(&label, max_label_chars);
+            let display_label = truncate(&label, project_col_width);
 
             let sessions_str = match row.kind {
                 RowKind::Project | RowKind::Model => format!("{}", row.session_count),
@@ -212,7 +222,6 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         })
         .collect();
 
-    let spark_width = crate::types::SPARKLINE_BUCKETS as u16;
     let widths = if wide {
         vec![
             Constraint::Min(30),
