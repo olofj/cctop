@@ -205,6 +205,10 @@ impl AppState {
             buckets[idx].cost += e.cost;
         }
 
+        // Triangular smoothing [0.25, 0.5, 0.25] to reduce spikiness from
+        // large single responses landing in one narrow bucket.
+        smooth_buckets(&mut buckets);
+
         buckets
     }
 
@@ -494,6 +498,31 @@ fn short_id(id: &str) -> String {
     s
 }
 
+/// Apply triangular smoothing [0.25, 0.5, 0.25] to histogram buckets.
+/// This spreads spikes from single large API responses across neighbors.
+fn smooth_buckets(buckets: &mut [HistBucket]) {
+    if buckets.len() < 3 {
+        return;
+    }
+    // Smooth each field independently using a temporary copy.
+    let n = buckets.len();
+    let orig: Vec<HistBucket> = buckets.to_vec();
+    for i in 0..n {
+        let prev = if i > 0 { &orig[i - 1] } else { &orig[i] };
+        let curr = &orig[i];
+        let next = if i + 1 < n { &orig[i + 1] } else { &orig[i] };
+
+        buckets[i].input_tokens = weighted_avg(prev.input_tokens, curr.input_tokens, next.input_tokens);
+        buckets[i].output_tokens = weighted_avg(prev.output_tokens, curr.output_tokens, next.output_tokens);
+        buckets[i].cache_tokens = weighted_avg(prev.cache_tokens, curr.cache_tokens, next.cache_tokens);
+        buckets[i].cost = (prev.cost * 0.25) + (curr.cost * 0.5) + (next.cost * 0.25);
+    }
+}
+
+fn weighted_avg(prev: u64, curr: u64, next: u64) -> u64 {
+    ((prev as f64 * 0.25) + (curr as f64 * 0.5) + (next as f64 * 0.25)) as u64
+}
+
 // --- Internal aggregation structs ---
 
 struct ProjectAgg {
@@ -673,7 +702,7 @@ mod tests {
     fn histogram_entry_in_last_bucket() {
         let now = fixed_now();
         let mut app = AppState::new(WindowSize::W5m, None);
-        // Entry 1 second ago → should land in the last bucket
+        // Entry 1 second ago → should land in the last bucket region
         app.ingest(vec![make_entry(
             "/test",
             "s1",
@@ -681,10 +710,17 @@ mod tests {
             1000,
         )]);
         let buckets = app.histogram(now, 10);
-        // Last bucket should have the tokens
-        assert_eq!(buckets[9].input_tokens, 1000);
-        // Other buckets should be empty
-        assert!(buckets[..9].iter().all(|b| b.input_tokens == 0));
+        // After smoothing, the last bucket should have the most tokens
+        let max_idx = buckets
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, b)| b.input_tokens)
+            .unwrap()
+            .0;
+        assert!(max_idx >= 8, "peak should be near the end, got bucket {max_idx}");
+        // Total should be approximately preserved (smoothing rounds u64)
+        let total: u64 = buckets.iter().map(|b| b.input_tokens).sum();
+        assert!(total >= 900 && total <= 1100, "total {total} should be ~1000");
     }
 
     #[test]
@@ -699,10 +735,14 @@ mod tests {
             500,
         )]);
         let buckets = app.histogram(now, 10);
-        // Should land in bucket 0 or 1 (near the oldest edge)
-        let total: u64 = buckets.iter().map(|b| b.input_tokens).sum();
-        assert_eq!(total, 500);
-        assert!(buckets[0].input_tokens == 500 || buckets[1].input_tokens == 500);
+        // Peak should be near the start
+        let max_idx = buckets
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, b)| b.input_tokens)
+            .unwrap()
+            .0;
+        assert!(max_idx <= 2, "peak should be near the start, got bucket {max_idx}");
     }
 
     #[test]
@@ -766,18 +806,27 @@ mod tests {
         app.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
         let h1 = app.histogram(now, num_buckets);
-        let idx1 = h1.iter().position(|b| b.input_tokens == 1000);
+        let peak1 = h1
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, b)| b.input_tokens)
+            .unwrap()
+            .0;
 
         // Advance time by exactly one bucket
         let later = now + chrono::Duration::seconds(bucket_secs as i64);
         let h2 = app.histogram(later, num_buckets);
-        let idx2 = h2.iter().position(|b| b.input_tokens == 1000);
+        let peak2 = h2
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, b)| b.input_tokens)
+            .unwrap()
+            .0;
 
-        // The entry should have shifted left by one bucket (or fallen off)
-        match (idx1, idx2) {
-            (Some(i1), Some(i2)) => assert_eq!(i2 + 1, i1),
-            (Some(_), None) => {} // fell off the left edge, also valid
-            _ => panic!("entry should be in exactly one bucket"),
+        // The peak should have shifted left by one bucket (or fallen off edge)
+        let total2: u64 = h2.iter().map(|b| b.input_tokens).sum();
+        if total2 > 0 {
+            assert_eq!(peak2 + 1, peak1, "peak should shift left by one bucket");
         }
     }
 
@@ -893,6 +942,54 @@ mod tests {
         assert_eq!(format_tokens(1_500), "1.5K");
         assert_eq!(format_tokens(50_000), "50K");
         assert_eq!(format_tokens(1_500_000), "1.5M");
+    }
+
+    // --- Smoothing tests ---
+
+    #[test]
+    fn smooth_spreads_spike_to_neighbors() {
+        let mut buckets = vec![HistBucket::default(); 5];
+        buckets[2].input_tokens = 1000;
+        smooth_buckets(&mut buckets);
+        // Center should get 50%, neighbors 25% each
+        assert_eq!(buckets[2].input_tokens, 500);
+        assert_eq!(buckets[1].input_tokens, 250);
+        assert_eq!(buckets[3].input_tokens, 250);
+        assert_eq!(buckets[0].input_tokens, 0);
+        assert_eq!(buckets[4].input_tokens, 0);
+    }
+
+    #[test]
+    fn smooth_edge_bucket_mirrors() {
+        let mut buckets = vec![HistBucket::default(); 3];
+        buckets[0].input_tokens = 1000;
+        smooth_buckets(&mut buckets);
+        // Edge: prev=self, so bucket[0] = 0.25*1000 + 0.5*1000 + 0.25*0 = 750
+        assert_eq!(buckets[0].input_tokens, 750);
+        assert_eq!(buckets[1].input_tokens, 250);
+        assert_eq!(buckets[2].input_tokens, 0);
+    }
+
+    #[test]
+    fn smooth_uniform_stays_uniform() {
+        let mut buckets = vec![
+            HistBucket { input_tokens: 100, output_tokens: 0, cache_tokens: 0, cost: 0.0 };
+            5
+        ];
+        smooth_buckets(&mut buckets);
+        // Uniform data should remain uniform (edges slightly differ due to mirroring)
+        for b in &buckets {
+            assert_eq!(b.input_tokens, 100);
+        }
+    }
+
+    #[test]
+    fn smooth_too_few_buckets_noop() {
+        let mut buckets = vec![
+            HistBucket { input_tokens: 1000, output_tokens: 0, cache_tokens: 0, cost: 0.0 },
+        ];
+        smooth_buckets(&mut buckets);
+        assert_eq!(buckets[0].input_tokens, 1000);
     }
 
     // --- Dedup test ---
