@@ -285,14 +285,24 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         return;
     }
 
-    // Find max total tokens across all buckets for Y scaling
-    let max_tokens: u64 = buckets
-        .iter()
-        .map(|b| b.input_tokens + b.output_tokens + b.cache_tokens)
-        .max()
-        .unwrap_or(0);
+    let metric = app.graph_metric;
 
-    if max_tokens == 0 {
+    // Extract the Y-value for a bucket based on the current metric
+    let bucket_value = |b: &crate::types::HistBucket| -> f64 {
+        match metric {
+            crate::types::GraphMetric::Tokens => {
+                (b.input_tokens + b.output_tokens + b.cache_tokens) as f64
+            }
+            crate::types::GraphMetric::Cost => b.cost,
+        }
+    };
+
+    let max_value: f64 = buckets
+        .iter()
+        .map(&bucket_value)
+        .fold(0.0f64, f64::max);
+
+    if max_value < 1e-9 {
         // Render empty state
         let msg = "No activity in window";
         let x = inner.x + (inner.width.saturating_sub(msg.len() as u16)) / 2;
@@ -330,8 +340,8 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         let mut spans: Vec<Span> = Vec::with_capacity(chart_width);
 
         for (col, bucket) in buckets.iter().enumerate() {
-            let total = bucket.input_tokens + bucket.output_tokens + bucket.cache_tokens;
-            let total_height = (total as f64 / max_tokens as f64) * sub_positions;
+            let val = bucket_value(bucket);
+            let total_height = (val / max_value) * sub_positions;
 
             let row_from_bottom = chart_height - 1 - row;
             let row_bottom = (row_from_bottom * 8) as f64;
@@ -345,8 +355,8 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             let block = block_char(total_height, row_bottom, row_top);
 
             let color = if let Some(ref sb) = sel_buckets {
-                let sel_total = sb[col].input_tokens + sb[col].output_tokens + sb[col].cache_tokens;
-                let sel_height = (sel_total as f64 / max_tokens as f64) * sub_positions;
+                let sel_val = bucket_value(&sb[col]);
+                let sel_height = (sel_val / max_value) * sub_positions;
                 if sel_height > row_bottom {
                     COL_HIGHLIGHT
                 } else {
@@ -376,9 +386,15 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     }
 
     // Y-axis labels (left side): top, middle, bottom
+    let format_y = |v: f64| -> String {
+        match metric {
+            crate::types::GraphMetric::Tokens => format_tokens(v as u64),
+            crate::types::GraphMetric::Cost => format_cost(v),
+        }
+    };
     let labels = [
-        (0, format_tokens(max_tokens)),
-        (chart_height / 2, format_tokens(max_tokens / 2)),
+        (0, format_y(max_value)),
+        (chart_height / 2, format_y(max_value / 2.0)),
         (chart_height.saturating_sub(1), "0".to_string()),
     ];
     for (row, label) in &labels {
@@ -511,6 +527,8 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
         " color({})  ",
         app.bar_color_mode.label()
     )));
+    spans.push(Span::styled("m", Style::default().fg(COL_KEY)));
+    spans.push(Span::raw(format!(" graph({})  ", app.graph_metric.label())));
     spans.push(Span::styled("c", Style::default().fg(COL_KEY)));
     spans.push(Span::raw(" collapse  "));
     spans.push(Span::styled("q", Style::default().fg(COL_KEY)));

@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use chrono::{DateTime, Utc};
 
 use crate::types::{
-    BarColorMode, DisplayRow, HistBucket, MAX_RETENTION_SECS, RowKind, SPARKLINE_BUCKETS,
-    Selection, SortColumn, TokenEntry, WindowSize,
+    BarColorMode, DisplayRow, GraphMetric, HistBucket, MAX_RETENTION_SECS, RowKind,
+    SPARKLINE_BUCKETS, Selection, SortColumn, TokenEntry, WindowSize,
 };
 
 pub struct AppState {
@@ -46,6 +46,9 @@ pub struct AppState {
     /// How to color histogram bars.
     pub bar_color_mode: BarColorMode,
 
+    /// What the histogram Y-axis shows.
+    pub graph_metric: GraphMetric,
+
     /// Hidden project names.
     hidden: HashSet<String>,
 
@@ -74,6 +77,7 @@ impl AppState {
             scroll_offset: 0,
             expanded: HashSet::new(),
             bar_color_mode: BarColorMode::TokenType,
+            graph_metric: GraphMetric::Cost,
             hidden: HashSet::new(),
             project_filter,
             status: None,

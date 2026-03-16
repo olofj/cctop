@@ -149,6 +149,9 @@ fn main() -> io::Result<()> {
                 (KeyCode::Char('t'), _) => {
                     app.bar_color_mode = app.bar_color_mode.toggle();
                 }
+                (KeyCode::Char('m'), _) => {
+                    app.graph_metric = app.graph_metric.toggle();
+                }
 
                 _ => {}
             }

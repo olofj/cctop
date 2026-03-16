@@ -272,3 +272,26 @@ impl BarColorMode {
         }
     }
 }
+
+/// What metric the histogram Y-axis shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphMetric {
+    Cost,
+    Tokens,
+}
+
+impl GraphMetric {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Cost => Self::Tokens,
+            Self::Tokens => Self::Cost,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cost => "$",
+            Self::Tokens => "tok",
+        }
+    }
+}
