@@ -25,11 +25,21 @@ pub fn get_claude_paths() -> Vec<PathBuf> {
 
     let mut paths = Vec::new();
     if let Some(home) = dirs::home_dir() {
+        // ~/.claude (legacy and current default)
         let default_claude = home.join(".claude");
         if default_claude.join(PROJECTS_DIR).is_dir() {
             paths.push(default_claude);
         }
+
+        // ~/.config/claude (Claude Code v1.0.30+, used on macOS and Linux)
+        // Checked explicitly because dirs::config_dir() on macOS returns
+        // ~/Library/Application Support/ which is not where Claude stores data.
+        let dotconfig_claude = home.join(".config").join("claude");
+        if dotconfig_claude.join(PROJECTS_DIR).is_dir() && !paths.contains(&dotconfig_claude) {
+            paths.push(dotconfig_claude);
+        }
     }
+    // Also check the platform config dir (XDG on Linux, ~/Library/Application Support on macOS)
     if let Some(config) = dirs::config_dir() {
         let xdg_claude = config.join("claude");
         if xdg_claude.join(PROJECTS_DIR).is_dir() && !paths.contains(&xdg_claude) {
