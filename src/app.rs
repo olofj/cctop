@@ -1045,6 +1045,16 @@ pub fn format_cost(cost: f64) -> String {
     }
 }
 
+/// Format a cumulative cost total — always shows 2 decimal places so cents
+/// are never truncated (e.g. "$145.23", not "$145").
+pub fn format_cost_total(cost: f64) -> String {
+    if cost < 0.005 {
+        "$0.00".to_string()
+    } else {
+        format!("${:.2}", cost)
+    }
+}
+
 pub fn format_relative_time(ts: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     let Some(ts) = ts else {
         return "-".to_string();
@@ -1335,6 +1345,15 @@ mod tests {
         assert_eq!(format_cost(1.23), "$1.23");
         assert_eq!(format_cost(45.6), "$45.6");
         assert_eq!(format_cost(123.0), "$123");
+    }
+
+    #[test]
+    fn format_cost_total_values() {
+        assert_eq!(format_cost_total(0.0), "$0.00");
+        assert_eq!(format_cost_total(1.23), "$1.23");
+        assert_eq!(format_cost_total(45.67), "$45.67");
+        assert_eq!(format_cost_total(145.23), "$145.23");
+        assert_eq!(format_cost_total(1234.56), "$1234.56");
     }
 
     #[test]

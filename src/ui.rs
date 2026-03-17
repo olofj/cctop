@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
-use crate::app::{AppState, format_cost, format_rate, format_relative_time, format_tokens};
+use crate::app::{AppState, format_cost, format_cost_total, format_rate, format_relative_time, format_tokens};
 use crate::types::RowKind;
 
 // --- Muted color palette (256-color indexed) ---
@@ -123,7 +123,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
     let summary_line = Line::from(vec![
         Span::raw("  Loaded: "),
         Span::styled(
-            format_cost(total_cost),
+            format_cost_total(total_cost),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
@@ -161,9 +161,9 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     let spark_width = crate::types::SPARKLINE_BUCKETS as u16;
     let fixed_cols: u16 = spark_width
         + if wide {
-            4 + 15 + 8 + 8 + 8 + 8 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
+            4 + 15 + 8 + 8 + 8 + 10 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
         } else {
-            4 + 12 + 7 + 7 + 7 + 7 + 7
+            4 + 12 + 7 + 7 + 7 + 9 + 7
         }
         + 3; // table borders/padding
     let project_col_width = area.width.saturating_sub(fixed_cols) as usize;
@@ -218,7 +218,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
                 Cell::from(format_rate(row.output_per_min)),
                 Cell::from(format_cost(row.cost_per_min))
                     .style(Style::default().fg(cost_color(row.cost_per_min))),
-                Cell::from(format_cost(row.cost_today)),
+                Cell::from(format_cost_total(row.cost_today)),
                 Cell::from(format_relative_time(row.last_activity, now)),
             ];
 
@@ -235,7 +235,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
-            Constraint::Length(8),
+            Constraint::Length(10),
             Constraint::Length(8),
         ]
     } else {
@@ -247,7 +247,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(7),
-            Constraint::Length(7),
+            Constraint::Length(9),
             Constraint::Length(7),
         ]
     };
