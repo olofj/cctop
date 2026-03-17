@@ -115,6 +115,10 @@ fn main() -> io::Result<()> {
             match (key.code, key.modifiers) {
                 (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
+                (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+                    terminal.clear()?;
+                    app.invalidate();
+                }
                 (KeyCode::Char('?'), _) => app.show_help = true,
 
                 (KeyCode::Up | KeyCode::Char('k'), _) => app.select_up(),

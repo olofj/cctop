@@ -608,6 +608,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         mk_help("u", "Unhide all hidden projects"),
         mk_help("c", "Collapse all expanded rows"),
         Line::styled("", Style::default().bg(bg)),
+        mk_help("Ctrl-L", "Force full screen redraw"),
         mk_help("q  Esc", "Quit"),
         mk_help("?", "Toggle this help"),
         Line::styled("", Style::default().bg(bg)),
