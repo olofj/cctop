@@ -98,7 +98,7 @@ Options:
                            Values: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
   -p, --project <PROJECT>  Filter to projects matching this substring
       --list-projects      List all discovered projects and exit
-      --tick-rate <MS>     UI refresh interval in milliseconds [default: 250]
+      --tick-rate <MS>     UI refresh interval in milliseconds [default: 3000]
   -h, --help               Print help
   -V, --version            Print version
 ```

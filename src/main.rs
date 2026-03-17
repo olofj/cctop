@@ -9,7 +9,7 @@ mod ui;
 mod watcher;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use clap::Parser;
@@ -39,7 +39,7 @@ struct Cli {
     list_projects: bool,
 
     /// UI refresh interval in milliseconds
-    #[arg(long, default_value = "250")]
+    #[arg(long, default_value = "3000")]
     tick_rate: u64,
 }
 
@@ -97,21 +97,35 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    // Main event loop
-    loop {
-        // Render
-        terminal.draw(|f| ui::render(f, &mut app))?;
+    // Main event loop — render on a timer (tick_rate, default 3s) or
+    // immediately after keyboard input for responsiveness.
+    let input_poll = Duration::from_millis(50);
+    let mut last_render = Instant::now();
+    let mut needs_render = true;
 
-        // Poll for keyboard events
-        if event::poll(tick_rate)?
+    loop {
+        // Render when the tick timer fires or after user input
+        if needs_render || last_render.elapsed() >= tick_rate {
+            terminal.draw(|f| ui::render(f, &mut app))?;
+            last_render = Instant::now();
+            needs_render = false;
+        }
+
+        // Poll for keyboard events (short timeout keeps input snappy)
+        let remaining = tick_rate.saturating_sub(last_render.elapsed());
+        let poll_timeout = remaining.min(input_poll);
+
+        if event::poll(poll_timeout)?
             && let Event::Key(key) = event::read()?
         {
             // Help overlay intercepts all keys
             if app.show_help {
                 app.show_help = false;
+                needs_render = true;
                 continue;
             }
 
+            needs_render = true;
             match (key.code, key.modifiers) {
                 (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
