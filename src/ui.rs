@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
 use crate::app::{
     AppState, format_cost, format_cost_total, format_rate, format_relative_time, format_tokens,
@@ -264,7 +264,11 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
         .row_highlight_style(Style::default().bg(COL_DIM))
         .highlight_symbol("│");
 
-    f.render_widget(table, area);
+    let mut table_state = TableState::default()
+        .with_selected(selected)
+        .with_offset(app.scroll_offset);
+
+    f.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
