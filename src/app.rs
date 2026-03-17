@@ -161,11 +161,6 @@ impl AppState {
 
     /// Force cache rebuild (e.g., after window/sort change).
     pub fn invalidate(&mut self) {
-        // Remember current selection so it survives row reordering
-        self.selected_key = self
-            .rows_cache
-            .get(self.selected)
-            .map(|r| r.tree_key.clone());
         self.cache_dirty = true;
     }
 
@@ -437,6 +432,12 @@ impl AppState {
     }
 
     fn rebuild_rows(&mut self, now: DateTime<Utc>) {
+        // Save current selection identity so it survives reordering
+        self.selected_key = self
+            .rows_cache
+            .get(self.selected)
+            .map(|r| r.tree_key.clone());
+
         let minutes = self.window.as_minutes();
         let n = SPARKLINE_BUCKETS;
 
