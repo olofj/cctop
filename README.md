@@ -9,21 +9,6 @@ cctop watches Claude Code's session JSONL files in real-time and displays
 per-project token rates, costs, and activity trends in an interactive TUI --
 think top(1) for your Claude Code spend.
 
-```
- cctop ─ Claude Code Token Monitor                   Window: [5m]
-  Rate: 45.2K tok/min   $2.31/min
-  Loaded: $87.42 across 12 sessions
-────────────────────────────────────────────────────────────────────
- PROJECT              TREND    SESS MODEL       IN/min OUT/min $/min
- ▸/home/user/myproj   ▁▃▅▇█▆▃▁   2 opus-4.6    38.2K   14.1K $1.23
- ▸/home/user/other    ▁▁▁▂▃▅▇█   1 sonnet-4.6   8.4K    3.7K $0.34
-────────────────────────────────────────────────────────────────────
- ■in ■out ■cache                              -5m            now
- ▁▁▂▃▃▅▅▆▇▇█▇▆▅▃▂▁▁▁▁▂▃▄▅▆▇█▇▇▆▅▄▃▂▁▁▁▁▁▁▁▂▃▄▅▅▆▇▇█▇▆▅▄▃▂▁
-────────────────────────────────────────────────────────────────────
- ↑↓ navigate  ←→ window  Enter expand  s sort  c collapse  q quit
-```
-
 ![cctop screenshot showing an 8-hour window with multiple projects](doc/screenshot.png)
 
 ## Features
