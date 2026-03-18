@@ -70,6 +70,9 @@ pub struct AppState {
     /// Cached display rows, rebuilt on demand.
     rows_cache: Vec<DisplayRow>,
     cache_dirty: bool,
+
+    /// Session count within the current display window (computed during rebuild).
+    window_session_count: usize,
 }
 
 impl AppState {
@@ -95,6 +98,7 @@ impl AppState {
             status: None,
             rows_cache: Vec::new(),
             cache_dirty: true,
+            window_session_count: 0,
         }
     }
 
@@ -190,9 +194,9 @@ impl AppState {
         self.loaded_costs.values().sum()
     }
 
-    /// Total sessions across all loaded data.
-    pub fn total_loaded_sessions(&self) -> usize {
-        self.loaded_sessions.values().map(|s| s.len()).sum()
+    /// Session count within the current display window.
+    pub fn window_sessions(&self) -> usize {
+        self.window_session_count
     }
 
     /// Build histogram data for the current window: buckets of token usage over time.
@@ -449,6 +453,7 @@ impl AppState {
         let left_edge = right_edge - window_secs;
 
         let mut project_data: BTreeMap<String, ProjectAgg> = BTreeMap::new();
+        let mut window_sessions: HashSet<String> = HashSet::new();
 
         for entry in &self.entries {
             let t = entry.timestamp.timestamp() as f64
@@ -471,6 +476,7 @@ impl AppState {
                 proj.output_tokens += entry.output_tokens;
                 proj.cost += entry.cost;
                 proj.sessions.insert(entry.session_id.clone());
+                window_sessions.insert(entry.session_id.clone());
                 *proj.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
                 proj.sparkline[idx] += total;
 
@@ -554,6 +560,7 @@ impl AppState {
         }
 
         self.rows_cache = rows;
+        self.window_session_count = window_sessions.len();
 
         // Restore selection to the same row identity after reordering
         if let Some(ref key) = self.selected_key {

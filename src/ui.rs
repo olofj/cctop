@@ -95,7 +95,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
     let (input_rate, output_rate, cost_rate) = app.total_rate(now);
     let total_rate = input_rate + output_rate;
     let total_cost = app.total_loaded_cost();
-    let sessions = app.total_loaded_sessions();
+    let sessions = app.window_sessions();
 
     let rate_color = rate_color(total_rate);
 
