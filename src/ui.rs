@@ -163,11 +163,11 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     let spark_width = crate::types::SPARKLINE_BUCKETS as u16;
     let fixed_cols: u16 = spark_width
         + if wide {
-            4 + 15 + 8 + 8 + 8 + 10 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
+            4 + 15 + 8 + 8 + 8 + 12 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
         } else {
-            4 + 12 + 7 + 7 + 7 + 9 + 7
+            4 + 12 + 7 + 7 + 7 + 10 + 7
         }
-        + 3; // table borders/padding
+        + 9; // inter-column spacing (8 gaps × 1) + highlight symbol
     let project_col_width = area.width.saturating_sub(fixed_cols) as usize;
 
     // Global sparkline max so all rows are scaled consistently
@@ -237,7 +237,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(8),
         ]
     } else {
@@ -249,7 +249,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(7),
-            Constraint::Length(9),
+            Constraint::Length(10),
             Constraint::Length(7),
         ]
     };
