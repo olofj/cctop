@@ -87,7 +87,7 @@ fn main() -> io::Result<()> {
 
     // Print startup info before entering TUI
     eprintln!(
-        "Pricing: {pricing_source}, scanning {} config path(s)...",
+        "Pricing: {pricing_source}, scanning {} config path(s)...\n",
         claude_paths.len(),
     );
 
