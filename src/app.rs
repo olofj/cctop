@@ -16,12 +16,6 @@ pub struct AppState {
     /// Recent entries within the max retention window (24h), time-ordered.
     entries: VecDeque<TokenEntry>,
 
-    /// Cumulative cost per project across all loaded data.
-    loaded_costs: HashMap<String, f64>,
-
-    /// Session IDs seen per project across all loaded data.
-    loaded_sessions: HashMap<String, HashSet<String>>,
-
     /// Global dedup hashes across all files.
     seen_hashes: HashSet<String>,
 
@@ -76,8 +70,6 @@ impl AppState {
     pub fn new(window: WindowSize, project_filter: Option<String>) -> Self {
         Self {
             entries: VecDeque::new(),
-            loaded_costs: HashMap::new(),
-            loaded_sessions: HashMap::new(),
             seen_hashes: HashSet::new(),
             window,
             sort_column: SortColumn::CostRate,
@@ -110,12 +102,6 @@ impl AppState {
             if !self.seen_hashes.insert(entry.dedup_key.clone()) {
                 continue;
             }
-            *self.loaded_costs.entry(entry.project.clone()).or_default() += entry.cost;
-            self.loaded_sessions
-                .entry(entry.project.clone())
-                .or_default()
-                .insert(entry.session_id.clone());
-
             self.entries.push_back(entry);
         }
         self.cache_dirty = true;
@@ -185,14 +171,26 @@ impl AppState {
         )
     }
 
-    /// Total cost across all loaded data (within retention window).
-    pub fn total_loaded_cost(&self) -> f64 {
-        self.loaded_costs.values().sum()
+    /// Total cost within the current display window.
+    pub fn total_window_cost(&self, now: DateTime<Utc>) -> f64 {
+        let cutoff = now - chrono::Duration::from_std(self.window.as_duration()).unwrap();
+        self.entries
+            .iter()
+            .filter(|e| e.timestamp >= cutoff)
+            .map(|e| e.cost)
+            .sum()
     }
 
-    /// Total sessions across all loaded data.
-    pub fn total_loaded_sessions(&self) -> usize {
-        self.loaded_sessions.values().map(|s| s.len()).sum()
+    /// Total unique sessions within the current display window.
+    pub fn total_window_sessions(&self, now: DateTime<Utc>) -> usize {
+        let cutoff = now - chrono::Duration::from_std(self.window.as_duration()).unwrap();
+        let mut seen = HashSet::new();
+        for e in &self.entries {
+            if e.timestamp >= cutoff {
+                seen.insert(&e.session_id);
+            }
+        }
+        seen.len()
     }
 
     /// Build histogram data for the current window: buckets of token usage over time.
@@ -577,8 +575,6 @@ impl AppState {
                 continue;
             }
             let is_expanded = self.expanded.contains(&proj.name);
-            let loaded_cost = self.loaded_costs.get(&proj.name).copied().unwrap_or(0.0);
-
             rows.push(DisplayRow {
                 kind: RowKind::Project,
                 label: proj.name.clone(),
@@ -588,7 +584,7 @@ impl AppState {
                 input_per_min: proj.input_tokens as f64 / minutes,
                 output_per_min: proj.output_tokens as f64 / minutes,
                 cost_per_min: proj.cost / minutes,
-                cost_today: loaded_cost,
+                cost_today: proj.cost,
                 last_activity: proj.last_activity,
                 is_expanded,
                 depth: 0,
@@ -694,8 +690,6 @@ impl AppState {
                 for (proj_name, model_agg) in &gm.projects {
                     let proj_key = format!("{}\0{}", model_key, proj_name);
                     let proj_expanded = self.expanded.contains(&proj_key);
-                    let loaded_cost = self.loaded_costs.get(proj_name).copied().unwrap_or(0.0);
-
                     rows.push(DisplayRow {
                         kind: RowKind::Project,
                         label: proj_name.clone(),
@@ -705,7 +699,7 @@ impl AppState {
                         input_per_min: model_agg.input_tokens as f64 / minutes,
                         output_per_min: model_agg.output_tokens as f64 / minutes,
                         cost_per_min: model_agg.cost / minutes,
-                        cost_today: loaded_cost,
+                        cost_today: model_agg.cost,
                         last_activity: model_agg.last_activity,
                         is_expanded: proj_expanded,
                         depth: 1,

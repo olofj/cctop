@@ -94,8 +94,8 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
 fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
     let (input_rate, output_rate, cost_rate) = app.total_rate(now);
     let total_rate = input_rate + output_rate;
-    let total_cost = app.total_loaded_cost();
-    let sessions = app.total_loaded_sessions();
+    let total_cost = app.total_window_cost(now);
+    let sessions = app.total_window_sessions(now);
 
     let rate_color = rate_color(total_rate);
 
@@ -123,7 +123,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
     ]);
 
     let summary_line = Line::from(vec![
-        Span::raw("  Loaded: "),
+        Span::raw("  Window: "),
         Span::styled(
             format_cost_total(total_cost),
             Style::default().add_modifier(Modifier::BOLD),
