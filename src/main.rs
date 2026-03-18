@@ -66,6 +66,9 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
+    // Load model pricing (fetch → cache → built-in)
+    let (price_count, price_source) = pricing::init_pricing();
+
     // --list-projects: print discovered projects and exit
     if cli.list_projects {
         use std::collections::BTreeSet;
@@ -82,8 +85,9 @@ fn main() -> io::Result<()> {
 
     // Print startup info before entering TUI
     eprintln!(
-        "Loaded built-in pricing for {} models, scanning {} config path(s)...",
-        pricing::model_count(),
+        "Loaded pricing for {} models ({}), scanning {} config path(s)...",
+        price_count,
+        price_source,
         claude_paths.len(),
     );
 

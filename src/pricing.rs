@@ -1,12 +1,24 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Olof Johansson
 //
-// Model pricing and cost calculation, adapted from ccusage.
+// Model pricing and cost calculation.
+//
+// Pricing is downloaded from LiteLLM's model_prices_and_context_window.json
+// at startup, cached locally, with built-in fallback defaults.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::types::RawRecord;
+
+const LITELLM_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+static PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ModelPricing {
@@ -22,7 +34,7 @@ pub struct ModelPricing {
 }
 
 impl ModelPricing {
-    const fn new(input: f64, output: f64, cache_write: f64, cache_read: f64) -> Self {
+    fn new(input: f64, output: f64, cache_write: f64, cache_read: f64) -> Self {
         Self {
             input,
             output,
@@ -35,139 +47,242 @@ impl ModelPricing {
             fast_multiplier: 1.0,
         }
     }
-
-    const fn with_tiered(
-        mut self,
-        input: f64,
-        output: f64,
-        cache_write: f64,
-        cache_read: f64,
-    ) -> Self {
-        self.input_above_200k = Some(input);
-        self.output_above_200k = Some(output);
-        self.cache_write_above_200k = Some(cache_write);
-        self.cache_read_above_200k = Some(cache_read);
-        self
-    }
-
-    const fn with_fast(mut self, multiplier: f64) -> Self {
-        self.fast_multiplier = multiplier;
-        self
-    }
 }
 
-const fn mtok(rate: f64) -> f64 {
+/// Overrides for features LiteLLM doesn't track (tiered pricing, fast mode).
+struct PricingOverride {
+    input_above_200k: Option<f64>,
+    output_above_200k: Option<f64>,
+    cache_write_above_200k: Option<f64>,
+    cache_read_above_200k: Option<f64>,
+    fast_multiplier: f64,
+}
+
+/// Model name prefixes that should get tiered/fast overrides.
+/// These are applied to any model whose name contains the key substring.
+fn get_overrides() -> Vec<(&'static str, PricingOverride)> {
+    vec![
+        // Sonnet 3.5 old — tiered
+        (
+            "claude-3-5-sonnet-20240620",
+            PricingOverride {
+                input_above_200k: Some(mtok(6.0)),
+                output_above_200k: Some(mtok(30.0)),
+                cache_write_above_200k: Some(mtok(7.50)),
+                cache_read_above_200k: Some(mtok(0.60)),
+                fast_multiplier: 1.0,
+            },
+        ),
+        // Sonnet 4.x — tiered
+        (
+            "claude-sonnet-4",
+            PricingOverride {
+                input_above_200k: Some(mtok(6.0)),
+                output_above_200k: Some(mtok(22.50)),
+                cache_write_above_200k: Some(mtok(7.50)),
+                cache_read_above_200k: Some(mtok(0.60)),
+                fast_multiplier: 1.0,
+            },
+        ),
+        // Opus 4.6 — tiered + fast
+        (
+            "claude-opus-4-6",
+            PricingOverride {
+                input_above_200k: Some(mtok(10.0)),
+                output_above_200k: Some(mtok(37.50)),
+                cache_write_above_200k: Some(mtok(12.50)),
+                cache_read_above_200k: Some(mtok(1.0)),
+                fast_multiplier: 6.0,
+            },
+        ),
+    ]
+}
+
+fn mtok(rate: f64) -> f64 {
     rate / 1_000_000.0
 }
 
-pub static PRICING: LazyLock<HashMap<&'static str, ModelPricing>> =
-    LazyLock::new(|| {
-        let mut m = HashMap::new();
+/// Where to source pricing data from.
+#[derive(Debug, Clone, Copy)]
+pub enum PricingSource {
+    Fetched,
+    Cached,
+    BuiltIn,
+}
 
-        // --- Haiku models ---
-        let haiku_35 = ModelPricing::new(mtok(0.80), mtok(4.0), mtok(1.0), mtok(0.08));
-        m.insert("anthropic.claude-3-5-haiku-20241022-v1:0", haiku_35.clone());
-        m.insert("claude-3-5-haiku-20241022", haiku_35);
+impl std::fmt::Display for PricingSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fetched => write!(f, "fetched from LiteLLM"),
+            Self::Cached => write!(f, "loaded from cache"),
+            Self::BuiltIn => write!(f, "built-in defaults"),
+        }
+    }
+}
 
-        let haiku_45 = ModelPricing::new(mtok(1.0), mtok(5.0), mtok(1.25), mtok(0.10));
-        m.insert("anthropic.claude-haiku-4-5-20251001-v1:0", haiku_45.clone());
-        m.insert("anthropic.claude-haiku-4-5@20251001", haiku_45.clone());
-        m.insert("claude-3-5-haiku-latest", haiku_45.clone());
-        m.insert("claude-haiku-4-5-20251001", haiku_45.clone());
-        m.insert("claude-haiku-4-5", haiku_45);
+fn cache_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("cctop")
+        .join("model_prices.json")
+}
 
-        let haiku_3 = ModelPricing::new(mtok(0.25), mtok(1.25), mtok(0.30), mtok(0.03));
-        m.insert("anthropic.claude-3-haiku-20240307-v1:0", haiku_3.clone());
-        m.insert("claude-3-haiku-20240307", haiku_3);
+/// Initialize pricing table. Call once at startup.
+/// Returns (model_count, source).
+pub fn init_pricing() -> (usize, PricingSource) {
+    let (table, source) = load_pricing_table();
+    let count = table.len();
+    let _ = PRICING.set(table);
+    (count, source)
+}
 
-        // --- Sonnet models ---
-        let sonnet_35_old = ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30))
-            .with_tiered(mtok(6.0), mtok(30.0), mtok(7.50), mtok(0.60));
-        m.insert(
-            "anthropic.claude-3-5-sonnet-20240620-v1:0",
-            sonnet_35_old.clone(),
-        );
-        m.insert("anthropic.claude-3-5-sonnet-20241022-v2:0", sonnet_35_old);
+fn load_pricing_table() -> (HashMap<String, ModelPricing>, PricingSource) {
+    // Try fetching from LiteLLM
+    if let Some(json) = fetch_litellm() {
+        if let Some(table) = parse_litellm_json(&json) {
+            // Cache for offline use
+            save_cache(&json);
+            return (table, PricingSource::Fetched);
+        }
+    }
 
-        let sonnet_37_old = ModelPricing::new(mtok(3.60), mtok(18.0), mtok(4.50), mtok(0.36));
-        m.insert("anthropic.claude-3-7-sonnet-20240620-v1:0", sonnet_37_old);
+    // Fall back to cached version
+    let cache = cache_path();
+    if let Ok(json) = fs::read_to_string(&cache) {
+        if let Some(table) = parse_litellm_json(&json) {
+            return (table, PricingSource::Cached);
+        }
+    }
 
-        let sonnet_37 = ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30));
-        m.insert(
-            "anthropic.claude-3-7-sonnet-20250219-v1:0",
-            sonnet_37.clone(),
-        );
-        m.insert("claude-3-7-sonnet-20250219", sonnet_37.clone());
-        m.insert("claude-3-7-sonnet-latest", sonnet_37);
+    // Fall back to minimal built-in defaults
+    (builtin_defaults(), PricingSource::BuiltIn)
+}
 
-        let sonnet_3 = ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30));
-        m.insert("anthropic.claude-3-sonnet-20240229-v1:0", sonnet_3);
+fn fetch_litellm() -> Option<String> {
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(FETCH_TIMEOUT))
+            .build(),
+    );
+    let response = match agent.get(LITELLM_URL).call() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  (fetch failed: {})", e);
+            return None;
+        }
+    };
+    match response.into_body().read_to_string() {
+        Ok(body) => Some(body),
+        Err(e) => {
+            eprintln!("  (read failed: {})", e);
+            None
+        }
+    }
+}
 
-        let sonnet_4x = ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30))
-            .with_tiered(mtok(6.0), mtok(22.50), mtok(7.50), mtok(0.60));
-        m.insert("anthropic.claude-sonnet-4-6", sonnet_4x.clone());
-        m.insert("anthropic.claude-sonnet-4-20250514-v1:0", sonnet_4x.clone());
-        m.insert(
-            "anthropic.claude-sonnet-4-5-20250929-v1:0",
-            sonnet_4x.clone(),
-        );
-        let sonnet_35 = ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30));
-        m.insert("claude-3-5-sonnet-20240620", sonnet_35.clone());
-        m.insert("claude-3-5-sonnet-20241022", sonnet_35.clone());
-        m.insert("claude-3-5-sonnet-latest", sonnet_35);
-        m.insert("claude-4-sonnet-20250514", sonnet_4x.clone());
-        m.insert("claude-sonnet-4-5", sonnet_4x.clone());
-        m.insert("claude-sonnet-4-5-20250929", sonnet_4x.clone());
-        m.insert("claude-sonnet-4-5-20250929-v1:0", sonnet_4x.clone());
-        m.insert("claude-sonnet-4-6", sonnet_4x.clone());
-        m.insert("claude-sonnet-4-20250514", sonnet_4x);
+fn save_cache(json: &str) {
+    let path = cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, json);
+}
 
-        // --- Opus models ---
-        let opus_3 = ModelPricing::new(mtok(15.0), mtok(75.0), mtok(18.75), mtok(1.50));
-        m.insert("anthropic.claude-3-opus-20240229-v1:0", opus_3.clone());
-        m.insert("claude-3-opus-20240229", opus_3.clone());
-        m.insert("claude-3-opus-latest", opus_3);
+/// Parse LiteLLM JSON and extract Claude/Anthropic model pricing.
+fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
+    let root: HashMap<String, serde_json::Value> = serde_json::from_str(json).ok()?;
+    let overrides = get_overrides();
+    let mut table = HashMap::new();
 
-        let opus_4 = ModelPricing::new(mtok(15.0), mtok(75.0), mtok(18.75), mtok(1.50));
-        m.insert("anthropic.claude-opus-4-1-20250805-v1:0", opus_4.clone());
-        m.insert("anthropic.claude-opus-4-20250514-v1:0", opus_4.clone());
-        m.insert("claude-4-opus-20250514", opus_4.clone());
-        m.insert("claude-opus-4-1", opus_4.clone());
-        m.insert("claude-opus-4-1-20250805", opus_4.clone());
-        m.insert("claude-opus-4-20250514", opus_4);
+    for (model_name, value) in &root {
+        // Only include Claude/Anthropic models
+        if !is_claude_model(model_name) {
+            continue;
+        }
 
-        let opus_45 = ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50));
-        m.insert("anthropic.claude-opus-4-5-20251101-v1:0", opus_45.clone());
-        m.insert("claude-opus-4-5-20251101", opus_45.clone());
-        m.insert("claude-opus-4-5", opus_45);
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
 
-        let opus_46 = ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50))
-            .with_tiered(mtok(10.0), mtok(37.50), mtok(12.50), mtok(1.0))
-            .with_fast(6.0);
-        m.insert("anthropic.claude-opus-4-6-v1", opus_46.clone());
-        m.insert("claude-opus-4-6", opus_46.clone());
-        m.insert("claude-opus-4-6-20260205", opus_46);
+        let input = match obj.get("input_cost_per_token").and_then(|v| v.as_f64()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let output = match obj.get("output_cost_per_token").and_then(|v| v.as_f64()) {
+            Some(v) => v,
+            None => continue,
+        };
 
-        // --- Legacy ---
-        m.insert(
-            "anthropic.claude-instant-v1",
-            ModelPricing::new(mtok(0.80), mtok(2.40), 0.0, 0.0),
-        );
-        m.insert(
-            "anthropic.claude-v1",
-            ModelPricing::new(mtok(8.0), mtok(24.0), 0.0, 0.0),
-        );
-        m.insert(
-            "anthropic.claude-v2:1",
-            ModelPricing::new(mtok(8.0), mtok(24.0), 0.0, 0.0),
-        );
+        // Skip models with zero pricing (likely placeholders)
+        if input == 0.0 && output == 0.0 {
+            continue;
+        }
 
-        m
-    });
+        let cache_write = obj
+            .get("cache_creation_input_token_cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let cache_read = obj
+            .get("cache_read_input_token_cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
 
-/// Number of model entries in the built-in pricing table.
-pub fn model_count() -> usize {
-    PRICING.len()
+        let mut pricing = ModelPricing::new(input, output, cache_write, cache_read);
+
+        // Apply overrides for tiered pricing and fast mode
+        for (pattern, ov) in &overrides {
+            if model_name.contains(pattern) {
+                pricing.input_above_200k = ov.input_above_200k;
+                pricing.output_above_200k = ov.output_above_200k;
+                pricing.cache_write_above_200k = ov.cache_write_above_200k;
+                pricing.cache_read_above_200k = ov.cache_read_above_200k;
+                pricing.fast_multiplier = ov.fast_multiplier;
+                break;
+            }
+        }
+
+        table.insert(model_name.clone(), pricing);
+    }
+
+    if table.is_empty() {
+        return None;
+    }
+    Some(table)
+}
+
+fn is_claude_model(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("claude") || lower.starts_with("anthropic")
+}
+
+/// Minimal built-in defaults when both fetch and cache fail.
+fn builtin_defaults() -> HashMap<String, ModelPricing> {
+    let mut m = HashMap::new();
+
+    // Haiku 4.5
+    m.insert(
+        "claude-haiku-4-5".into(),
+        ModelPricing::new(mtok(1.0), mtok(5.0), mtok(1.25), mtok(0.10)),
+    );
+
+    // Sonnet 4.6
+    let mut sonnet = ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30));
+    sonnet.input_above_200k = Some(mtok(6.0));
+    sonnet.output_above_200k = Some(mtok(22.50));
+    sonnet.cache_write_above_200k = Some(mtok(7.50));
+    sonnet.cache_read_above_200k = Some(mtok(0.60));
+    m.insert("claude-sonnet-4-6".into(), sonnet);
+
+    // Opus 4.6
+    let mut opus = ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50));
+    opus.input_above_200k = Some(mtok(10.0));
+    opus.output_above_200k = Some(mtok(37.50));
+    opus.cache_write_above_200k = Some(mtok(12.50));
+    opus.cache_read_above_200k = Some(mtok(1.0));
+    opus.fast_multiplier = 6.0;
+    m.insert("claude-opus-4-6".into(), opus);
+
+    m
 }
 
 const MODEL_PREFIXES: &[&str] = &[
@@ -178,18 +293,19 @@ const MODEL_PREFIXES: &[&str] = &[
     "openrouter/openai/",
 ];
 
-pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
-    if let Some(p) = PRICING.get(model) {
+pub fn lookup_pricing(model: &str) -> Option<&ModelPricing> {
+    let table = PRICING.get()?;
+    if let Some(p) = table.get(model) {
         return Some(p);
     }
     for prefix in MODEL_PREFIXES {
         let prefixed = format!("{}{}", prefix, model);
-        if let Some(p) = PRICING.get(prefixed.as_str()) {
+        if let Some(p) = table.get(&prefixed) {
             return Some(p);
         }
     }
     let model_lower = model.to_lowercase();
-    for (key, pricing) in PRICING.iter() {
+    for (key, pricing) in table.iter() {
         if key.to_lowercase().contains(&model_lower) {
             return Some(pricing);
         }
