@@ -165,6 +165,11 @@ pub static PRICING: LazyLock<HashMap<&'static str, ModelPricing>> =
         m
     });
 
+/// Number of model entries in the built-in pricing table.
+pub fn model_count() -> usize {
+    PRICING.len()
+}
+
 const MODEL_PREFIXES: &[&str] = &[
     "anthropic/",
     "claude-3-5-",

@@ -80,6 +80,13 @@ fn main() -> io::Result<()> {
         std::process::exit(0);
     }
 
+    // Print startup info before entering TUI
+    eprintln!(
+        "Loaded built-in pricing for {} models, scanning {} config path(s)...",
+        pricing::model_count(),
+        claude_paths.len(),
+    );
+
     // Initial scan + start file watcher
     let (initial_entries, watcher_rx) = watcher::start(claude_paths, types::MAX_RETENTION_SECS);
 
