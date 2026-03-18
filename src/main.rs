@@ -3,6 +3,7 @@
 
 mod app;
 mod discovery;
+mod model_costs;
 mod pricing;
 mod types;
 mod ui;
@@ -80,10 +81,13 @@ fn main() -> io::Result<()> {
         std::process::exit(0);
     }
 
+    // Load model pricing (download → cache → built-in fallback)
+    let (pricing_map, pricing_source) = model_costs::load_model_pricing();
+    pricing::set_pricing(pricing_map);
+
     // Print startup info before entering TUI
     eprintln!(
-        "Loaded built-in pricing for {} models, scanning {} config path(s)...",
-        pricing::model_count(),
+        "Pricing: {pricing_source}, scanning {} config path(s)...",
         claude_paths.len(),
     );
 

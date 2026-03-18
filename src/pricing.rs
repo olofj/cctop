@@ -4,7 +4,7 @@
 // Model pricing and cost calculation, adapted from ccusage.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use crate::types::RawRecord;
 
@@ -60,7 +60,29 @@ const fn mtok(rate: f64) -> f64 {
     rate / 1_000_000.0
 }
 
-pub static PRICING: LazyLock<HashMap<&'static str, ModelPricing>> =
+/// Runtime pricing table, set at startup from downloaded or cached data.
+/// If set before any lookup, this takes priority over the built-in table.
+static ACTIVE_PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
+
+/// Set the active pricing table (call before any lookups).
+pub fn set_pricing(map: HashMap<String, ModelPricing>) {
+    let _ = ACTIVE_PRICING.set(map);
+}
+
+/// Get the active pricing table, falling back to built-in if none was set.
+fn get_pricing() -> &'static HashMap<String, ModelPricing> {
+    ACTIVE_PRICING.get_or_init(|| builtin_pricing())
+}
+
+/// Return the built-in hardcoded pricing table (used as fallback).
+pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
+    BUILTIN_PRICING
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
+static BUILTIN_PRICING: LazyLock<HashMap<&'static str, ModelPricing>> =
     LazyLock::new(|| {
         let mut m = HashMap::new();
 
@@ -165,11 +187,6 @@ pub static PRICING: LazyLock<HashMap<&'static str, ModelPricing>> =
         m
     });
 
-/// Number of model entries in the built-in pricing table.
-pub fn model_count() -> usize {
-    PRICING.len()
-}
-
 const MODEL_PREFIXES: &[&str] = &[
     "anthropic/",
     "claude-3-5-",
@@ -179,19 +196,20 @@ const MODEL_PREFIXES: &[&str] = &[
 ];
 
 pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
-    if let Some(p) = PRICING.get(model) {
+    let pricing = get_pricing();
+    if let Some(p) = pricing.get(model) {
         return Some(p);
     }
     for prefix in MODEL_PREFIXES {
         let prefixed = format!("{}{}", prefix, model);
-        if let Some(p) = PRICING.get(prefixed.as_str()) {
+        if let Some(p) = pricing.get(&prefixed) {
             return Some(p);
         }
     }
     let model_lower = model.to_lowercase();
-    for (key, pricing) in PRICING.iter() {
+    for (key, p) in pricing.iter() {
         if key.to_lowercase().contains(&model_lower) {
-            return Some(pricing);
+            return Some(p);
         }
     }
     None
