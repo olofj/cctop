@@ -72,7 +72,7 @@ impl AppState {
             entries: VecDeque::new(),
             seen_hashes: HashSet::new(),
             window,
-            sort_column: SortColumn::CostRate,
+            sort_column: SortColumn::LastActivity,
             sort_ascending: false,
             selected: 0,
             selected_key: None,
