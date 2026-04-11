@@ -3,12 +3,12 @@
 //
 // TUI rendering with ratatui.
 
-use time::OffsetDateTime;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use time::OffsetDateTime;
 
 use crate::app::{
     AppState, format_cost, format_cost_total, format_rate, format_relative_time, format_tokens,

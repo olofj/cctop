@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rustc_hash::FxHashSet;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::discovery::{classify_file, get_projects_dirs, glob_usage_files};
 use crate::pricing::calculate_cost;

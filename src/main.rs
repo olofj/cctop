@@ -12,13 +12,13 @@ mod watcher;
 use std::io;
 use std::time::{Duration, Instant};
 
-use time::OffsetDateTime;
 use clap::Parser;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use time::OffsetDateTime;
 
 use app::AppState;
 use discovery::get_claude_paths;

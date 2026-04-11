@@ -206,7 +206,8 @@ impl AppState {
 
         // Quantize: snap the right edge to the next bucket boundary so that
         // the grid only shifts once per bucket_secs.
-        let now_epoch = now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
+        let now_epoch =
+            now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
@@ -331,7 +332,8 @@ impl AppState {
         let window_secs = self.window.as_secs() as f64;
         let bucket_secs = window_secs / num_buckets as f64;
 
-        let now_epoch = now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
+        let now_epoch =
+            now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
@@ -442,7 +444,8 @@ impl AppState {
         // Quantized bucket edges (same logic as histogram())
         let window_secs = self.window.as_secs() as f64;
         let bucket_secs = window_secs / n as f64;
-        let now_epoch = now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
+        let now_epoch =
+            now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
@@ -1098,7 +1101,11 @@ mod tests {
             cache_write_tokens: 0,
             cache_read_tokens: 0,
             cost: 0.01,
-            dedup_key: format!("{}:{}", (ts.unix_timestamp() * 1000 + ts.millisecond() as i64), input),
+            dedup_key: format!(
+                "{}:{}",
+                (ts.unix_timestamp() * 1000 + ts.millisecond() as i64),
+                input
+            ),
         }
     }
 
