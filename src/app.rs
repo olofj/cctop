@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use chrono::{DateTime, Utc};
+use time::OffsetDateTime;
 
 use crate::types::{
     BarColorMode, DisplayRow, GraphMetric, HistBucket, MAX_RETENTION_SECS, RowKind,
@@ -108,8 +108,8 @@ impl AppState {
     }
 
     /// Prune entries older than the max retention window (24h).
-    pub fn prune(&mut self, now: DateTime<Utc>) {
-        let cutoff = now - chrono::Duration::seconds(MAX_RETENTION_SECS);
+    pub fn prune(&mut self, now: OffsetDateTime) {
+        let cutoff = now - time::Duration::seconds(MAX_RETENTION_SECS);
         let old_len = self.entries.len();
         while self.entries.front().is_some_and(|e| e.timestamp < cutoff) {
             self.entries.pop_front();
@@ -120,7 +120,7 @@ impl AppState {
     }
 
     /// Build display rows from current state.
-    pub fn rows(&mut self, now: DateTime<Utc>) -> &[DisplayRow] {
+    pub fn rows(&mut self, now: OffsetDateTime) -> &[DisplayRow] {
         if self.cache_dirty {
             self.rebuild_rows(now);
             self.cache_dirty = false;
@@ -151,8 +151,8 @@ impl AppState {
     }
 
     /// Total token rate across all projects within the current window.
-    pub fn total_rate(&self, now: DateTime<Utc>) -> (f64, f64, f64) {
-        let cutoff = now - chrono::Duration::from_std(self.window.as_duration()).unwrap();
+    pub fn total_rate(&self, now: OffsetDateTime) -> (f64, f64, f64) {
+        let cutoff = now - time::Duration::try_from(self.window.as_duration()).unwrap();
         let minutes = self.window.as_minutes();
         let mut input = 0u64;
         let mut output = 0u64;
@@ -172,8 +172,8 @@ impl AppState {
     }
 
     /// Total cost within the current display window.
-    pub fn total_window_cost(&self, now: DateTime<Utc>) -> f64 {
-        let cutoff = now - chrono::Duration::from_std(self.window.as_duration()).unwrap();
+    pub fn total_window_cost(&self, now: OffsetDateTime) -> f64 {
+        let cutoff = now - time::Duration::try_from(self.window.as_duration()).unwrap();
         self.entries
             .iter()
             .filter(|e| e.timestamp >= cutoff)
@@ -182,8 +182,8 @@ impl AppState {
     }
 
     /// Total unique sessions within the current display window.
-    pub fn total_window_sessions(&self, now: DateTime<Utc>) -> usize {
-        let cutoff = now - chrono::Duration::from_std(self.window.as_duration()).unwrap();
+    pub fn total_window_sessions(&self, now: OffsetDateTime) -> usize {
+        let cutoff = now - time::Duration::try_from(self.window.as_duration()).unwrap();
         let mut seen = HashSet::new();
         for e in &self.entries {
             if e.timestamp >= cutoff {
@@ -197,7 +197,7 @@ impl AppState {
     ///
     /// Bucket boundaries are aligned to wall-clock multiples of `bucket_secs` so
     /// the chart slides smoothly one column at a time instead of jittering every frame.
-    pub fn histogram(&self, now: DateTime<Utc>, num_buckets: usize) -> Vec<HistBucket> {
+    pub fn histogram(&self, now: OffsetDateTime, num_buckets: usize) -> Vec<HistBucket> {
         if num_buckets == 0 {
             return Vec::new();
         }
@@ -206,15 +206,15 @@ impl AppState {
 
         // Quantize: snap the right edge to the next bucket boundary so that
         // the grid only shifts once per bucket_secs.
-        let now_epoch = now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
+        let now_epoch = now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
         let mut buckets = vec![HistBucket::default(); num_buckets];
 
         for e in &self.entries {
-            let t = e.timestamp.timestamp() as f64
-                + e.timestamp.timestamp_subsec_millis() as f64 / 1000.0;
+            let t = e.timestamp.unix_timestamp() as f64
+                + (e.timestamp.nanosecond() / 1_000_000) as f64 / 1000.0;
             if t < left_edge || t >= right_edge {
                 continue;
             }
@@ -321,7 +321,7 @@ impl AppState {
     /// Uses the same quantized bucketing and smoothing as `histogram()`.
     pub fn histogram_filtered(
         &self,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         num_buckets: usize,
         sel: &Selection,
     ) -> Vec<HistBucket> {
@@ -331,7 +331,7 @@ impl AppState {
         let window_secs = self.window.as_secs() as f64;
         let bucket_secs = window_secs / num_buckets as f64;
 
-        let now_epoch = now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
+        let now_epoch = now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
@@ -360,8 +360,8 @@ impl AppState {
                 }
             }
 
-            let t = e.timestamp.timestamp() as f64
-                + e.timestamp.timestamp_subsec_millis() as f64 / 1000.0;
+            let t = e.timestamp.unix_timestamp() as f64
+                + (e.timestamp.nanosecond() / 1_000_000) as f64 / 1000.0;
             if t < left_edge || t >= right_edge {
                 continue;
             }
@@ -429,7 +429,7 @@ impl AppState {
         self.selected = (self.selected + page_size).min(max);
     }
 
-    fn rebuild_rows(&mut self, now: DateTime<Utc>) {
+    fn rebuild_rows(&mut self, now: OffsetDateTime) {
         // Save current selection identity so it survives reordering
         self.selected_key = self
             .rows_cache
@@ -442,15 +442,15 @@ impl AppState {
         // Quantized bucket edges (same logic as histogram())
         let window_secs = self.window.as_secs() as f64;
         let bucket_secs = window_secs / n as f64;
-        let now_epoch = now.timestamp() as f64 + now.timestamp_subsec_millis() as f64 / 1000.0;
+        let now_epoch = now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
         let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
         let left_edge = right_edge - window_secs;
 
         let mut project_data: BTreeMap<String, ProjectAgg> = BTreeMap::new();
 
         for entry in &self.entries {
-            let t = entry.timestamp.timestamp() as f64
-                + entry.timestamp.timestamp_subsec_millis() as f64 / 1000.0;
+            let t = entry.timestamp.unix_timestamp() as f64
+                + (entry.timestamp.nanosecond() / 1_000_000) as f64 / 1000.0;
             let in_window = t >= left_edge && t < right_edge;
 
             let proj = project_data
@@ -886,7 +886,7 @@ struct GlobalModelAgg<'a> {
     output_tokens: u64,
     cost: f64,
     session_count: usize,
-    last_activity: Option<DateTime<Utc>>,
+    last_activity: Option<OffsetDateTime>,
     sparkline: [u64; SPARKLINE_BUCKETS],
     projects: Vec<(String, &'a ModelAgg)>,
 }
@@ -911,7 +911,7 @@ struct ModelAgg {
     input_tokens: u64,
     output_tokens: u64,
     cost: f64,
-    last_activity: Option<DateTime<Utc>>,
+    last_activity: Option<OffsetDateTime>,
     sparkline: [u64; SPARKLINE_BUCKETS],
     /// Session IDs that used this model.
     sessions: HashSet<String>,
@@ -938,7 +938,7 @@ struct ProjectAgg {
     cost: f64,
     sessions: HashSet<String>,
     model_costs: HashMap<String, f64>,
-    last_activity: Option<DateTime<Utc>>,
+    last_activity: Option<OffsetDateTime>,
     sparkline: [u64; SPARKLINE_BUCKETS],
     session_data: BTreeMap<String, SessionAgg>,
     model_data: BTreeMap<String, ModelAgg>,
@@ -967,7 +967,7 @@ struct SessionAgg {
     output_tokens: u64,
     cost: f64,
     model_costs: HashMap<String, f64>,
-    last_activity: Option<DateTime<Utc>>,
+    last_activity: Option<OffsetDateTime>,
     sparkline: [u64; SPARKLINE_BUCKETS],
     subagent_data: BTreeMap<String, SubagentAgg>,
 }
@@ -993,7 +993,7 @@ struct SubagentAgg {
     output_tokens: u64,
     cost: f64,
     model_costs: HashMap<String, f64>,
-    last_activity: Option<DateTime<Utc>>,
+    last_activity: Option<OffsetDateTime>,
     sparkline: [u64; SPARKLINE_BUCKETS],
 }
 
@@ -1049,11 +1049,11 @@ pub fn format_cost_total(cost: f64) -> String {
     }
 }
 
-pub fn format_relative_time(ts: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+pub fn format_relative_time(ts: Option<OffsetDateTime>, now: OffsetDateTime) -> String {
     let Some(ts) = ts else {
         return "-".to_string();
     };
-    let secs = (now - ts).num_seconds();
+    let secs = (now - ts).whole_seconds();
     if secs < 0 {
         "now".to_string()
     } else if secs < 60 {
@@ -1084,9 +1084,9 @@ pub fn format_tokens(tokens: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use time::macros::datetime;
 
-    fn make_entry(project: &str, session: &str, ts: DateTime<Utc>, input: u64) -> TokenEntry {
+    fn make_entry(project: &str, session: &str, ts: OffsetDateTime, input: u64) -> TokenEntry {
         TokenEntry {
             timestamp: ts,
             project: project.to_string(),
@@ -1098,12 +1098,12 @@ mod tests {
             cache_write_tokens: 0,
             cache_read_tokens: 0,
             cost: 0.01,
-            dedup_key: format!("{}:{}", ts.timestamp_millis(), input),
+            dedup_key: format!("{}:{}", (ts.unix_timestamp() * 1000 + ts.millisecond() as i64), input),
         }
     }
 
-    fn fixed_now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap()
+    fn fixed_now() -> OffsetDateTime {
+        datetime!(2026-03-15 12:00:00 UTC)
     }
 
     // --- Histogram bucketing tests ---
@@ -1124,7 +1124,7 @@ mod tests {
         app.ingest(vec![make_entry(
             "/test",
             "s1",
-            now - chrono::Duration::seconds(1),
+            now - time::Duration::seconds(1),
             1000,
         )]);
         let buckets = app.histogram(now, 10);
@@ -1155,7 +1155,7 @@ mod tests {
         app.ingest(vec![make_entry(
             "/test",
             "s1",
-            now - chrono::Duration::seconds(299),
+            now - time::Duration::seconds(299),
             500,
         )]);
         let buckets = app.histogram(now, 10);
@@ -1180,7 +1180,7 @@ mod tests {
         app.ingest(vec![make_entry(
             "/test",
             "s1",
-            now - chrono::Duration::seconds(120),
+            now - time::Duration::seconds(120),
             1000,
         )]);
         let buckets = app.histogram(now, 8);
@@ -1193,10 +1193,10 @@ mod tests {
         // quantized bucket should produce identical histograms.
         // bucket_secs for 5m/8 buckets = 37.5s. Pick two times well within
         // the same 37.5s bucket boundary.
-        let now1 = Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 10).unwrap();
-        let now2 = now1 + chrono::Duration::seconds(5); // 5s later, same bucket
+        let now1 = datetime!(2026-03-15 12:00:10 UTC);
+        let now2 = now1 + time::Duration::seconds(5); // 5s later, same bucket
 
-        let entry_ts = now1 - chrono::Duration::seconds(30);
+        let entry_ts = now1 - time::Duration::seconds(30);
 
         let mut app1 = AppState::new(WindowSize::W5m, None);
         app1.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
@@ -1222,13 +1222,13 @@ mod tests {
     #[test]
     fn histogram_slides_by_one_bucket() {
         // After exactly one bucket_secs elapses, the histogram should shift by one column.
-        let now = Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap();
+        let now = datetime!(2026-03-15 12:00:00 UTC);
         let num_buckets = 8;
         let window_secs = WindowSize::W8h.as_secs() as f64;
         let bucket_secs = window_secs / num_buckets as f64;
 
         // Place entry at a known position
-        let entry_ts = now - chrono::Duration::seconds(60);
+        let entry_ts = now - time::Duration::seconds(60);
         let mut app = AppState::new(WindowSize::W8h, None);
         app.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
@@ -1241,7 +1241,7 @@ mod tests {
             .0;
 
         // Advance time by exactly one bucket
-        let later = now + chrono::Duration::seconds(bucket_secs as i64);
+        let later = now + time::Duration::seconds(bucket_secs as i64);
         let h2 = app.histogram(later, num_buckets);
         let peak2 = h2
             .iter()
@@ -1266,8 +1266,8 @@ mod tests {
 
         // Add entries at different times within the window
         app.ingest(vec![
-            make_entry("/proj", "s1", now - chrono::Duration::seconds(10), 100),
-            make_entry("/proj", "s1", now - chrono::Duration::seconds(200), 200),
+            make_entry("/proj", "s1", now - time::Duration::seconds(10), 100),
+            make_entry("/proj", "s1", now - time::Duration::seconds(200), 200),
         ]);
 
         let rows = app.rows(now);
@@ -1286,7 +1286,7 @@ mod tests {
         app.ingest(vec![make_entry(
             "/proj",
             "s1",
-            now - chrono::Duration::seconds(300),
+            now - time::Duration::seconds(300),
             1000,
         )]);
 
@@ -1307,7 +1307,7 @@ mod tests {
         let entries: Vec<TokenEntry> = (0..8)
             .map(|i| {
                 let age = 290 - i * 35; // spread across the window
-                make_entry("/proj", "s1", now - chrono::Duration::seconds(age), 100)
+                make_entry("/proj", "s1", now - time::Duration::seconds(age), 100)
             })
             .collect();
         app.ingest(entries);
@@ -1356,15 +1356,15 @@ mod tests {
         assert_eq!(format_relative_time(None, now), "-");
         assert_eq!(format_relative_time(Some(now), now), "0s ago");
         assert_eq!(
-            format_relative_time(Some(now - chrono::Duration::seconds(30)), now),
+            format_relative_time(Some(now - time::Duration::seconds(30)), now),
             "30s ago"
         );
         assert_eq!(
-            format_relative_time(Some(now - chrono::Duration::seconds(120)), now),
+            format_relative_time(Some(now - time::Duration::seconds(120)), now),
             "2m ago"
         );
         assert_eq!(
-            format_relative_time(Some(now - chrono::Duration::seconds(7200)), now),
+            format_relative_time(Some(now - time::Duration::seconds(7200)), now),
             "2h ago"
         );
     }
@@ -1459,7 +1459,7 @@ mod tests {
         app.ingest(vec![make_entry(
             "/proj",
             "s1",
-            now - chrono::Duration::hours(25),
+            now - time::Duration::hours(25),
             100,
         )]);
         assert_eq!(app.entries.len(), 1);
@@ -1474,7 +1474,7 @@ mod tests {
         app.ingest(vec![make_entry(
             "/proj",
             "s1",
-            now - chrono::Duration::hours(1),
+            now - time::Duration::hours(1),
             100,
         )]);
         app.prune(now);

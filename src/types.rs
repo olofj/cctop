@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Olof Johansson
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
+use time::OffsetDateTime;
 
 // --- JSONL deserialization types (adapted from ccusage) ---
 
@@ -42,7 +42,7 @@ pub struct Usage {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TokenEntry {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: OffsetDateTime,
     pub project: String,
     pub session_id: String,
     pub subagent_id: Option<String>,
@@ -225,7 +225,7 @@ pub struct DisplayRow {
     pub output_per_min: f64,
     pub cost_per_min: f64,
     pub cost_today: f64,
-    pub last_activity: Option<DateTime<Utc>>,
+    pub last_activity: Option<OffsetDateTime>,
     pub is_expanded: bool,
     pub depth: u8,
     pub tree_key: String,

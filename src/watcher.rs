@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use chrono::{DateTime, Utc};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rustc_hash::FxHashSet;
 
@@ -36,7 +37,7 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
     }
 
     let record: RawRecord = serde_json::from_str(line).ok()?;
-    let timestamp: DateTime<Utc> = record.timestamp.parse().ok()?;
+    let timestamp = OffsetDateTime::parse(&record.timestamp, &Rfc3339).ok()?;
 
     let model = record
         .message
@@ -121,7 +122,7 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
 fn tail_read_file(
     path: &Path,
     identity: &FileIdentity,
-    cutoff: DateTime<Utc>,
+    cutoff: OffsetDateTime,
     seen: &mut FxHashSet<String>,
 ) -> (Vec<TokenEntry>, u64) {
     let mut entries = Vec::new();
@@ -158,7 +159,7 @@ fn tail_read_file(
         }
 
         let mut line = String::new();
-        let mut earliest_in_range: Option<DateTime<Utc>> = None;
+        let mut earliest_in_range: Option<OffsetDateTime> = None;
 
         loop {
             line.clear();
@@ -187,7 +188,7 @@ fn tail_read_file(
 
         // If all entries we found are within range and the earliest is right at the
         // cutoff boundary, we might be missing older entries — try a larger tail
-        if earliest_in_range.is_some_and(|t| t <= cutoff + chrono::Duration::seconds(10))
+        if earliest_in_range.is_some_and(|t| t <= cutoff + time::Duration::seconds(10))
             && tail_bytes < file_len
         {
             tail_bytes *= 2;
@@ -211,7 +212,7 @@ pub fn start(
     let mut file_states: HashMap<PathBuf, FileState> = HashMap::new();
     let mut global_seen = FxHashSet::default();
 
-    let cutoff = Utc::now() - chrono::Duration::seconds(retention_secs);
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(retention_secs);
 
     for path in &files {
         let identity = classify_file(path);

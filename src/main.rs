@@ -12,7 +12,7 @@ mod watcher;
 use std::io;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use clap::Parser;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -206,7 +206,7 @@ fn main() -> io::Result<()> {
         }
 
         // Prune old entries
-        app.prune(Utc::now());
+        app.prune(OffsetDateTime::now_utc());
     }
 
     Ok(())

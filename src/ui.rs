@@ -3,7 +3,7 @@
 //
 // TUI rendering with ratatui.
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -51,7 +51,7 @@ const MIN_GRAPH_HEIGHT: u16 = 6;
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn render(f: &mut Frame, app: &mut AppState) {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let area = f.area();
 
     // Ensure rows cache is fresh
@@ -91,7 +91,7 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
     }
 }
 
-fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
+fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) {
     let (input_rate, output_rate, cost_rate) = app.total_rate(now);
     let total_rate = input_rate + output_rate;
     let total_cost = app.total_window_cost(now);
@@ -139,7 +139,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTim
     f.render_widget(header, area);
 }
 
-fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
+fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) {
     let rows_data = app.cached_rows();
     let selected = app.selected;
 
@@ -271,7 +271,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime
     f.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: chrono::DateTime<Utc>) {
+fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(COL_DIM))
