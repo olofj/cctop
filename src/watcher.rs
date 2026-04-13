@@ -214,7 +214,32 @@ pub fn start(
 
     let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(retention_secs);
 
+    // Convert cutoff to SystemTime for mtime comparison
+    let mtime_cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(retention_secs as u64);
+
     for path in &files {
+        // Skip files not modified within the retention window
+        let dominated_by_mtime = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|mtime| mtime < mtime_cutoff);
+        if dominated_by_mtime {
+            // Still register the file so the watcher can track future writes
+            let identity = classify_file(path);
+            let file_len = path.metadata().map(|m| m.len()).unwrap_or(0);
+            file_states.insert(
+                path.clone(),
+                FileState {
+                    identity,
+                    byte_offset: file_len,
+                    seen_hashes: FxHashSet::default(),
+                },
+            );
+            continue;
+        }
+
         let identity = classify_file(path);
         let (entries, offset) = tail_read_file(path, &identity, cutoff, &mut global_seen);
 
