@@ -159,13 +159,16 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
 
     let wide = area.width >= 100;
 
-    // Compute actual PROJECT column width: total minus fixed columns
+    // Compute actual PROJECT column width: total minus fixed columns.
+    // MODEL is sized to fit names like "claude-opus-4-6-fast" (20 chars) in
+    // wide mode so version suffixes (e.g. 4-6 vs 4-7) are distinguishable.
     let spark_width = crate::types::SPARKLINE_BUCKETS as u16;
+    let (model_width, model_width_narrow) = (20u16, 14u16);
     let fixed_cols: u16 = spark_width
         + if wide {
-            4 + 15 + 8 + 8 + 8 + 12 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
+            4 + model_width + 8 + 8 + 8 + 12 + 8 // SESS + MODEL + IN + OUT + $/min + $TOTAL + LAST
         } else {
-            4 + 12 + 7 + 7 + 7 + 10 + 7
+            4 + model_width_narrow + 7 + 7 + 7 + 10 + 7
         }
         + 9; // inter-column spacing (8 gaps × 1) + highlight symbol
     let project_col_width = area.width.saturating_sub(fixed_cols) as usize;
@@ -207,7 +210,14 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
                 _ => String::new(),
             };
 
-            let model_display = truncate(&row.model, 14);
+            let model_display = truncate(
+                &row.model,
+                if wide {
+                    model_width as usize
+                } else {
+                    model_width_narrow as usize
+                },
+            );
 
             let spark = render_sparkline(&row.sparkline, sparkline_max, is_active);
 
@@ -233,7 +243,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
             Constraint::Min(30),
             Constraint::Length(spark_width),
             Constraint::Length(4),
-            Constraint::Length(15),
+            Constraint::Length(model_width),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
@@ -245,7 +255,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
             Constraint::Min(20),
             Constraint::Length(spark_width),
             Constraint::Length(4),
-            Constraint::Length(12),
+            Constraint::Length(model_width_narrow),
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(7),
