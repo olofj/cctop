@@ -3,8 +3,8 @@
 //
 // Model pricing and cost calculation, adapted from ccusage.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Mutex, OnceLock};
 
 use crate::types::RawRecord;
 
@@ -33,6 +33,26 @@ pub fn set_pricing(map: HashMap<String, ModelPricing>) {
 /// Get the active pricing table, falling back to built-in if none was set.
 fn get_pricing() -> &'static HashMap<String, ModelPricing> {
     ACTIVE_PRICING.get_or_init(builtin_pricing)
+}
+
+/// Models seen in usage data for which no pricing entry could be found.
+/// Collected during the session and printed on exit.
+static UNKNOWN_MODELS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+
+fn record_unknown_model(model: &str) {
+    let set = UNKNOWN_MODELS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    if let Ok(mut guard) = set.lock() {
+        guard.insert(model.to_string());
+    }
+}
+
+/// Return a sorted snapshot of models encountered without pricing data.
+pub fn unknown_models() -> Vec<String> {
+    let set = UNKNOWN_MODELS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    match set.lock() {
+        Ok(guard) => guard.iter().cloned().collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Minimal last-resort fallback pricing for when LiteLLM download and cache
@@ -142,7 +162,10 @@ fn calculate_from_tokens(record: &RawRecord) -> f64 {
     };
     let pricing = match lookup_pricing(model) {
         Some(p) => p,
-        None => return 0.0,
+        None => {
+            record_unknown_model(model);
+            return 0.0;
+        }
     };
     let usage = &record.message.usage;
     let mut cost = 0.0;
@@ -179,5 +202,59 @@ fn tiered_cost(tokens: u64, base_rate: f64, tiered_rate: Option<f64>) -> f64 {
             base_tokens * base_rate + excess_tokens * above_rate
         }
         _ => tokens as f64 * base_rate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_for_model(model: &str) -> RawRecord {
+        // Use a unique made-up model name via JSON so all required fields
+        // are populated without needing Default impls on RawRecord.
+        let json = format!(
+            r#"{{
+                "timestamp": "2026-04-16T10:00:00Z",
+                "message": {{
+                    "usage": {{"input_tokens": 100, "output_tokens": 50}},
+                    "model": "{model}"
+                }}
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// When pricing data lacks an entry for the model in a record, the cost
+    /// is treated as $0 and the model name is recorded so it can be surfaced
+    /// to the user at exit.
+    #[test]
+    fn unknown_model_is_recorded_and_costs_zero() {
+        let unique = "cctop-test-fictional-model-zzz-9000";
+        let record = record_for_model(unique);
+
+        let cost = calculate_cost(&record);
+
+        assert_eq!(cost, 0.0, "unknown model should yield zero cost");
+        assert!(
+            unknown_models().iter().any(|m| m == unique),
+            "unknown model {unique:?} should be recorded, got: {:?}",
+            unknown_models()
+        );
+    }
+
+    /// Known models (from the built-in table used when no download has
+    /// populated ACTIVE_PRICING) must not be recorded as unknown.
+    #[test]
+    fn known_model_is_not_recorded_as_unknown() {
+        let known = "claude-opus-4-6";
+        let record = record_for_model(known);
+
+        let cost = calculate_cost(&record);
+
+        assert!(cost > 0.0, "known model should yield non-zero cost");
+        assert!(
+            !unknown_models().iter().any(|m| m == known),
+            "known model {known:?} must not appear in unknown_models()"
+        );
     }
 }

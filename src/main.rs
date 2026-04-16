@@ -101,7 +101,7 @@ fn main() -> io::Result<()> {
     // Initialize terminal — create guard immediately so raw mode is
     // always cleaned up, even if EnterAlternateScreen fails.
     terminal::enable_raw_mode()?;
-    let _guard = TerminalGuard;
+    let guard = TerminalGuard;
     io::stdout().execute(EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(io::stdout());
@@ -207,6 +207,18 @@ fn main() -> io::Result<()> {
 
         // Prune old entries
         app.prune(OffsetDateTime::now_utc());
+    }
+
+    // Restore the terminal before printing so messages appear on the real
+    // screen instead of being hidden by the alternate screen buffer.
+    drop(guard);
+
+    let unknowns = pricing::unknown_models();
+    if !unknowns.is_empty() {
+        eprintln!(
+            "Unknown models (no pricing data, cost treated as $0): {}",
+            unknowns.join(", ")
+        );
     }
 
     Ok(())
