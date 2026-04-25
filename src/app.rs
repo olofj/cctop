@@ -736,7 +736,7 @@ impl AppState {
         rows: &mut Vec<DisplayRow>,
     ) {
         let mut sessions: Vec<&SessionAgg> = proj.session_data.values().collect();
-        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
 
         for sess in sessions {
             self.emit_one_session(sess, parent_key, depth, minutes, rows);
@@ -757,7 +757,7 @@ impl AppState {
             .values()
             .filter(|s| model_sessions.contains(&s.session_id))
             .collect();
-        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
 
         for sess in sessions {
             self.emit_one_session(sess, parent_key, 2, minutes, rows);
@@ -794,7 +794,7 @@ impl AppState {
 
         if sess_expanded {
             let mut agents: Vec<&SubagentAgg> = sess.subagent_data.values().collect();
-            agents.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+            agents.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
 
             for agent in agents {
                 rows.push(DisplayRow {
