@@ -119,7 +119,13 @@ fn parse_litellm_json(json: &str) -> HashMap<String, ModelPricing> {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
 
-        let mut pricing = ModelPricing {
+        let fast_multiplier = obj
+            .get("provider_specific_entry")
+            .and_then(|v| v.get("fast"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
+
+        let pricing = ModelPricing {
             input,
             output,
             cache_write,
@@ -136,13 +142,8 @@ fn parse_litellm_json(json: &str) -> HashMap<String, ModelPricing> {
             cache_read_above_200k: obj
                 .get("cache_read_input_token_cost_above_200k_tokens")
                 .and_then(|v| v.as_f64()),
-            fast_multiplier: 1.0,
+            fast_multiplier,
         };
-
-        // Apply known fast multipliers (not in LiteLLM data)
-        if name.contains("opus-4-6") {
-            pricing.fast_multiplier = 6.0;
-        }
 
         models.insert(name.clone(), pricing);
     }
