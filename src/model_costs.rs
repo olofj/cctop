@@ -33,17 +33,26 @@ impl std::fmt::Display for PricingSource {
 }
 
 /// Try to load model pricing: fetch → cache → built-in fallback.
+///
+/// Network failures fall through to the next source. JSON parse failures
+/// from a successfully-loaded source are fatal — they signal that LiteLLM's
+/// schema has changed in a way our parser doesn't understand, and silently
+/// using stale builtin prices would produce misleading cost numbers.
 pub fn load_model_pricing() -> (HashMap<String, ModelPricing>, PricingSource) {
     // Try fresh download
     match fetch_litellm() {
-        Ok(json) => {
-            let models = parse_litellm_json(&json);
-            if !models.is_empty() {
+        Ok(json) => match parse_litellm_json(&json) {
+            Ok(models) => {
                 let count = models.len();
                 write_cache(&json);
                 return (models, PricingSource::Downloaded(count));
             }
-        }
+            Err(e) => {
+                eprintln!("error: failed to parse LiteLLM pricing data: {e}");
+                eprintln!("       LiteLLM's JSON schema may have changed; please file an issue.");
+                std::process::exit(1);
+            }
+        },
         Err(e) => {
             eprintln!("Note: could not fetch model prices: {e}");
         }
@@ -51,10 +60,16 @@ pub fn load_model_pricing() -> (HashMap<String, ModelPricing>, PricingSource) {
 
     // Try cached version
     if let Some(json) = read_cache() {
-        let models = parse_litellm_json(&json);
-        if !models.is_empty() {
-            let count = models.len();
-            return (models, PricingSource::Cached(count));
+        match parse_litellm_json(&json) {
+            Ok(models) => {
+                let count = models.len();
+                return (models, PricingSource::Cached(count));
+            }
+            Err(e) => {
+                eprintln!("error: failed to parse cached LiteLLM pricing data: {e}");
+                eprintln!("       Delete the cache file and retry, or file an issue.");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -90,11 +105,9 @@ fn write_cache(data: &str) {
     }
 }
 
-fn parse_litellm_json(json: &str) -> HashMap<String, ModelPricing> {
-    let raw: HashMap<String, serde_json::Value> = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
+fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPricing>, String> {
+    let raw: HashMap<String, serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
 
     let mut models = HashMap::new();
     for (name, obj) in &raw {
@@ -148,5 +161,12 @@ fn parse_litellm_json(json: &str) -> HashMap<String, ModelPricing> {
         models.insert(name.clone(), pricing);
     }
 
-    models
+    if models.is_empty() {
+        return Err(format!(
+            "JSON parsed successfully but yielded 0 model entries (saw {} top-level keys)",
+            raw.len()
+        ));
+    }
+
+    Ok(models)
 }
