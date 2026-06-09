@@ -194,6 +194,42 @@ fn initial_scan_end_to_end() {
 }
 
 #[test]
+fn cache_breakdown_drives_tokens_and_cost() {
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let file = fx.session_file("-test-proj", "22222222-2222-3333-4444-555555555555");
+
+    // 1h-dominant cache write, flat field present alongside the breakdown
+    // (the live record shape): tokens must count 5m+1h, and cost must bill
+    // 1h at 2x input — not the flat field at the 5m rate.
+    append_line(
+        &file,
+        &format!(
+            r#"{{"type":"assistant","timestamp":"{}","requestId":"r1",
+                "message":{{"usage":{{"input_tokens":0,"output_tokens":0,
+                    "cache_creation_input_tokens":300000,
+                    "cache_creation":{{"ephemeral_5m_input_tokens":100000,
+                                       "ephemeral_1h_input_tokens":200000}}}},
+                    "model":"claude-haiku-4-5","id":"m1"}}}}"#,
+            rfc3339(now)
+        )
+        .replace('\n', ""),
+    );
+
+    let entries = fx.scan();
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert_eq!(e.cache_write_tokens, 300_000);
+    // Haiku 4.5: 100k 5m at $1.25/MTok + 200k 1h at 2 x $1/MTok = $0.125 + $0.40
+    let expected = 100_000.0 * 1.25e-6 + 200_000.0 * 2.0e-6;
+    assert!(
+        (e.cost - expected).abs() < 1e-9,
+        "cost {} != {expected}",
+        e.cost
+    );
+}
+
+#[test]
 fn subagent_files_attributed_to_parent_session() {
     let fx = Fixture::new();
     let now = OffsetDateTime::now_utc();

@@ -143,6 +143,7 @@ fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPricing>, Strin
             output,
             cache_write,
             cache_read,
+            cache_write_1h: None,
             input_above_200k: obj
                 .get("input_cost_per_token_above_200k_tokens")
                 .and_then(|v| v.as_f64()),
