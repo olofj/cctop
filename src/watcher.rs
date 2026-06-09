@@ -17,7 +17,11 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::discovery::{classify_file, get_projects_dirs, glob_usage_files};
 use crate::pricing::calculate_cost;
-use crate::types::{FileIdentity, RawRecord, TokenEntry, WatchEvent};
+use crate::types::{FileIdentity, ProgressRecord, RawRecord, TokenEntry, WatchEvent};
+
+/// Placeholder model on records Claude Code injects for non-API events
+/// (e.g. "no response requested" notices); they carry no real usage.
+const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 /// Tracks read position and dedup state for a single JSONL file.
 struct FileState {
@@ -36,8 +40,19 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
         return None;
     }
 
-    let record: RawRecord = serde_json::from_str(line).ok()?;
+    // Direct assistant line first; otherwise a progress wrapper whose
+    // usage is nested under data.message.message.
+    let record: RawRecord = match serde_json::from_str(line) {
+        Ok(r) => r,
+        Err(_) => serde_json::from_str::<ProgressRecord>(line)
+            .ok()
+            .and_then(ProgressRecord::into_raw_record)?,
+    };
     let timestamp = OffsetDateTime::parse(&record.timestamp, &Rfc3339).ok()?;
+
+    if record.message.model.as_deref() == Some(SYNTHETIC_MODEL) {
+        return None;
+    }
 
     let model = record
         .message
@@ -67,10 +82,14 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
         model: display_model,
         input_tokens: record.message.usage.input_tokens,
         output_tokens: record.message.usage.output_tokens,
-        cache_write_tokens: record.message.usage.cache_creation_input_tokens,
+        cache_write_tokens: record.message.usage.cache_creation_token_count(),
         cache_read_tokens: record.message.usage.cache_read_input_tokens,
         cost,
         dedup_key,
+        message_id: record.message.id.clone(),
+        request_id: record.request_id.clone(),
+        is_sidechain: record.is_sidechain,
+        has_speed: record.message.usage.speed.is_some(),
     })
 }
 
@@ -335,4 +354,96 @@ fn spawn_watcher(
     });
 
     rx
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn identity() -> FileIdentity {
+        FileIdentity {
+            path: PathBuf::from("/tmp/test.jsonl"),
+            project: "/test".to_string(),
+            session_id: "sess".to_string(),
+            subagent_id: None,
+        }
+    }
+
+    #[test]
+    fn parses_plain_assistant_line() {
+        let line = r#"{"timestamp":"2026-06-09T10:00:00Z","requestId":"r1",
+            "message":{"usage":{"input_tokens":10,"output_tokens":20},
+                       "model":"claude-haiku-4-5","id":"m1"}}"#
+            .replace('\n', "");
+        let e = parse_line(&line, &identity()).unwrap();
+        assert_eq!(e.input_tokens, 10);
+        assert_eq!(e.message_id.as_deref(), Some("m1"));
+        assert_eq!(e.request_id.as_deref(), Some("r1"));
+        assert_eq!(e.is_sidechain, None);
+        assert!(!e.has_speed);
+    }
+
+    #[test]
+    fn parses_progress_wrapper_line() {
+        let line = r#"{"type":"progress","timestamp":"2026-06-09T10:00:00Z","isSidechain":true,
+            "data":{"message":{"timestamp":"2026-06-09T10:00:01Z","requestId":"req_n",
+                "message":{"usage":{"input_tokens":5,"output_tokens":7},
+                           "model":"claude-haiku-4-5","id":"msg_n"}}}}"#
+            .replace('\n', "");
+        let e = parse_line(&line, &identity()).unwrap();
+        assert_eq!(e.input_tokens, 5);
+        assert_eq!(e.output_tokens, 7);
+        assert_eq!(e.message_id.as_deref(), Some("msg_n"));
+        assert_eq!(e.request_id.as_deref(), Some("req_n"));
+        // Sidechain comes from the envelope (absent), not the outer line.
+        assert_eq!(e.is_sidechain, None);
+    }
+
+    #[test]
+    fn skips_synthetic_records_plain_and_wrapped() {
+        let plain = r#"{"timestamp":"2026-06-09T10:00:00Z",
+            "message":{"usage":{"input_tokens":0,"output_tokens":0},"model":"<synthetic>"}}"#
+            .replace('\n', "");
+        assert!(parse_line(&plain, &identity()).is_none());
+
+        let wrapped = r#"{"type":"progress","timestamp":"2026-06-09T10:00:00Z",
+            "data":{"message":{"message":{"usage":{"input_tokens":0,"output_tokens":0},
+                "model":"<synthetic>"}}}}"#
+            .replace('\n', "");
+        assert!(parse_line(&wrapped, &identity()).is_none());
+    }
+
+    #[test]
+    fn skips_non_progress_wrapper_kinds() {
+        let line = r#"{"type":"queued","timestamp":"2026-06-09T10:00:00Z",
+            "data":{"message":{"message":{"usage":{"input_tokens":1,"output_tokens":1},
+                "model":"m"}}}}"#
+            .replace('\n', "");
+        assert!(parse_line(&line, &identity()).is_none());
+    }
+
+    #[test]
+    fn cache_breakdown_drives_cache_write_tokens() {
+        let line = r#"{"timestamp":"2026-06-09T10:00:00Z",
+            "message":{"usage":{"input_tokens":1,"output_tokens":1,
+                "cache_creation_input_tokens":999,
+                "cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}},
+                "model":"claude-haiku-4-5","id":"m1"}}"#
+            .replace('\n', "");
+        let e = parse_line(&line, &identity()).unwrap();
+        // Breakdown sum, not the flat field.
+        assert_eq!(e.cache_write_tokens, 300);
+    }
+
+    #[test]
+    fn fast_speed_suffixes_model_and_sets_has_speed() {
+        let line = r#"{"timestamp":"2026-06-09T10:00:00Z",
+            "message":{"usage":{"input_tokens":1,"output_tokens":1,"speed":"fast"},
+                "model":"claude-opus-4-6","id":"m1"}}"#
+            .replace('\n', "");
+        let e = parse_line(&line, &identity()).unwrap();
+        assert_eq!(e.model, "claude-opus-4-6-fast");
+        assert!(e.has_speed);
+    }
 }

@@ -1106,6 +1106,14 @@ mod tests {
                 (ts.unix_timestamp() * 1000 + ts.millisecond() as i64),
                 input
             ),
+            message_id: Some(format!(
+                "m-{}-{}",
+                ts.unix_timestamp() * 1000 + ts.millisecond() as i64,
+                input
+            )),
+            request_id: Some("r1".to_string()),
+            is_sidechain: None,
+            has_speed: false,
         }
     }
 

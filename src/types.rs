@@ -16,6 +16,8 @@ pub struct RawRecord {
     pub cost_usd: Option<f64>,
     #[serde(rename = "requestId")]
     pub request_id: Option<String>,
+    #[serde(rename = "isSidechain")]
+    pub is_sidechain: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +35,77 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cache_read_input_tokens: u64,
+    pub cache_creation: Option<CacheCreation>,
     pub speed: Option<String>,
+}
+
+/// Per-duration cache-creation breakdown (newer Claude Code records).
+/// 1h cache writes are billed at a higher rate than 5m writes.
+#[derive(Debug, Deserialize)]
+pub struct CacheCreation {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
+}
+
+impl Usage {
+    /// Total cache-creation tokens: the 5m/1h breakdown when present,
+    /// otherwise the flat field.
+    pub fn cache_creation_token_count(&self) -> u64 {
+        match &self.cache_creation {
+            Some(cc) => cc.ephemeral_5m_input_tokens + cc.ephemeral_1h_input_tokens,
+            None => self.cache_creation_input_tokens,
+        }
+    }
+}
+
+/// A `type:"progress"` wrapper line. Subagent transcripts (e.g. auto-compact
+/// agents) replay assistant messages nested under `data.message.message`,
+/// and for some messages the nested copy is the only complete usage record.
+#[derive(Debug, Deserialize)]
+pub struct ProgressRecord {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub timestamp: Option<String>,
+    pub data: ProgressData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProgressData {
+    pub message: ProgressEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProgressEnvelope {
+    pub timestamp: Option<String>,
+    #[serde(rename = "requestId")]
+    pub request_id: Option<String>,
+    #[serde(rename = "costUSD")]
+    pub cost_usd: Option<f64>,
+    #[serde(rename = "isSidechain")]
+    pub is_sidechain: Option<bool>,
+    pub message: Message,
+}
+
+impl ProgressRecord {
+    /// Flatten the wrapper into the common record shape.
+    pub fn into_raw_record(self) -> Option<RawRecord> {
+        if self.kind != "progress" {
+            return None;
+        }
+        let envelope = self.data.message;
+        Some(RawRecord {
+            timestamp: envelope.timestamp.or(self.timestamp)?,
+            message: envelope.message,
+            cost_usd: envelope.cost_usd,
+            request_id: envelope.request_id,
+            // Upstream reads this from the envelope (data.message), not the
+            // outer wrapper line — the envelope usually omits it, making
+            // nested copies non-sidechain for dedup tier purposes.
+            is_sidechain: envelope.is_sidechain,
+        })
+    }
 }
 
 // --- cctop-specific types ---
@@ -53,6 +125,17 @@ pub struct TokenEntry {
     pub cache_read_tokens: u64,
     pub cost: f64,
     pub dedup_key: String,
+    // Dedup metadata (mirrors ccusage's ParsedEntry)
+    pub message_id: Option<String>,
+    pub request_id: Option<String>,
+    pub is_sidechain: Option<bool>,
+    pub has_speed: bool,
+}
+
+impl TokenEntry {
+    pub fn token_total(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+    }
 }
 
 /// Identifies a tracked JSONL file.
@@ -320,5 +403,111 @@ impl GraphMetric {
             Self::Cost => "$",
             Self::Tokens => "tok",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_creation_count_prefers_breakdown() {
+        let usage: Usage = serde_json::from_str(
+            r#"{"input_tokens":1,"output_tokens":2,
+                "cache_creation_input_tokens":999,
+                "cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}}"#,
+        )
+        .unwrap();
+        // Breakdown present: the flat field must be ignored, not added.
+        assert_eq!(usage.cache_creation_token_count(), 300);
+    }
+
+    #[test]
+    fn cache_creation_count_falls_back_to_flat_field() {
+        let usage: Usage = serde_json::from_str(
+            r#"{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":999}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.cache_creation_token_count(), 999);
+    }
+
+    #[test]
+    fn progress_record_flattens_envelope() {
+        let line = r#"{
+            "type":"progress",
+            "timestamp":"2026-06-09T10:00:00Z",
+            "data":{"message":{
+                "timestamp":"2026-06-09T10:00:01Z",
+                "requestId":"req_nested",
+                "costUSD":0.05,
+                "message":{"usage":{"input_tokens":10,"output_tokens":20},
+                           "model":"claude-haiku-4-5","id":"msg_nested"}
+            }}
+        }"#;
+        let rec: ProgressRecord = serde_json::from_str(line).unwrap();
+        let raw = rec.into_raw_record().unwrap();
+        // Envelope timestamp wins over the wrapper's.
+        assert_eq!(raw.timestamp, "2026-06-09T10:00:01Z");
+        assert_eq!(raw.request_id.as_deref(), Some("req_nested"));
+        assert_eq!(raw.cost_usd, Some(0.05));
+        assert_eq!(raw.message.id.as_deref(), Some("msg_nested"));
+        assert_eq!(raw.message.usage.output_tokens, 20);
+    }
+
+    #[test]
+    fn progress_record_timestamp_falls_back_to_wrapper() {
+        let line = r#"{
+            "type":"progress",
+            "timestamp":"2026-06-09T10:00:00Z",
+            "data":{"message":{
+                "message":{"usage":{"input_tokens":1,"output_tokens":2},"model":"m"}
+            }}
+        }"#;
+        let rec: ProgressRecord = serde_json::from_str(line).unwrap();
+        let raw = rec.into_raw_record().unwrap();
+        assert_eq!(raw.timestamp, "2026-06-09T10:00:00Z");
+    }
+
+    #[test]
+    fn progress_record_sidechain_from_envelope_only() {
+        // The outer wrapper line usually carries isSidechain:true in subagent
+        // files; the envelope omits it, so the flattened record must be
+        // non-sidechain (None) for dedup replacement tiers.
+        let line = r#"{
+            "type":"progress",
+            "isSidechain":true,
+            "timestamp":"2026-06-09T10:00:00Z",
+            "data":{"message":{
+                "message":{"usage":{"input_tokens":1,"output_tokens":2},"model":"m"}
+            }}
+        }"#;
+        let rec: ProgressRecord = serde_json::from_str(line).unwrap();
+        let raw = rec.into_raw_record().unwrap();
+        assert_eq!(raw.is_sidechain, None);
+    }
+
+    #[test]
+    fn progress_record_rejects_other_kinds() {
+        let line = r#"{
+            "type":"queued",
+            "timestamp":"2026-06-09T10:00:00Z",
+            "data":{"message":{
+                "message":{"usage":{"input_tokens":1,"output_tokens":2},"model":"m"}
+            }}
+        }"#;
+        let rec: ProgressRecord = serde_json::from_str(line).unwrap();
+        assert!(rec.into_raw_record().is_none());
+    }
+
+    #[test]
+    fn progress_record_without_any_timestamp_rejected() {
+        let line = r#"{
+            "type":"progress",
+            "data":{"message":{
+                "message":{"usage":{"input_tokens":1,"output_tokens":2},"model":"m"}
+            }}
+        }"#;
+        let rec: ProgressRecord = serde_json::from_str(line).unwrap();
+        assert!(rec.into_raw_record().is_none());
     }
 }
