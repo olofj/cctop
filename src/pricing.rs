@@ -25,12 +25,52 @@ pub struct ModelPricing {
     pub fast_multiplier: f64,
 }
 
+impl ModelPricing {
+    pub(crate) const fn new(input: f64, output: f64, cache_write: f64, cache_read: f64) -> Self {
+        Self {
+            input,
+            output,
+            cache_write,
+            cache_read,
+            cache_write_1h: None,
+            input_above_200k: None,
+            output_above_200k: None,
+            cache_write_above_200k: None,
+            cache_read_above_200k: None,
+            fast_multiplier: 1.0,
+        }
+    }
+
+    const fn with_tiered(
+        mut self,
+        input: f64,
+        output: f64,
+        cache_write: f64,
+        cache_read: f64,
+    ) -> Self {
+        self.input_above_200k = Some(input);
+        self.output_above_200k = Some(output);
+        self.cache_write_above_200k = Some(cache_write);
+        self.cache_read_above_200k = Some(cache_read);
+        self
+    }
+
+    const fn with_fast(mut self, multiplier: f64) -> Self {
+        self.fast_multiplier = multiplier;
+        self
+    }
+}
+
 /// Runtime pricing table, set at startup from downloaded or cached data.
-/// If set before any lookup, this takes priority over the built-in table.
 static ACTIVE_PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
 
-/// Set the active pricing table (call before any lookups).
-pub fn set_pricing(map: HashMap<String, ModelPricing>) {
+/// Install the dynamically loaded pricing table (call before any lookups).
+/// The builtin table is the offline floor; dynamic entries are merged on top
+/// so builtin-only models (e.g. fable-5, absent from LiteLLM) keep their
+/// rates when a download succeeds.
+pub fn set_pricing(dynamic: HashMap<String, ModelPricing>) {
+    let mut map = builtin_pricing();
+    map.extend(dynamic);
     let _ = ACTIVE_PRICING.set(map);
 }
 
@@ -63,57 +103,53 @@ pub fn unknown_models() -> Vec<String> {
 /// both fail. Only covers the most common current model families so the tool
 /// still provides rough cost estimates offline.
 pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
-    let mut m = HashMap::new();
+    let mut m: HashMap<String, ModelPricing> = HashMap::new();
+    let mut ins = |k: &str, v: ModelPricing| {
+        m.insert(k.to_string(), v);
+    };
 
     // Haiku 4.5
-    m.insert(
-        "claude-haiku-4-5".into(),
-        ModelPricing {
-            input: mtok(1.0),
-            output: mtok(5.0),
-            cache_write: mtok(1.25),
-            cache_read: mtok(0.10),
-            cache_write_1h: None,
-            input_above_200k: None,
-            output_above_200k: None,
-            cache_write_above_200k: None,
-            cache_read_above_200k: None,
-            fast_multiplier: 1.0,
-        },
+    ins(
+        "claude-haiku-4-5",
+        ModelPricing::new(mtok(1.0), mtok(5.0), mtok(1.25), mtok(0.10)),
     );
 
-    // Sonnet 4.5/4.6
-    m.insert(
-        "claude-sonnet-4-6".into(),
-        ModelPricing {
-            input: mtok(3.0),
-            output: mtok(15.0),
-            cache_write: mtok(3.75),
-            cache_read: mtok(0.30),
-            cache_write_1h: None,
-            input_above_200k: Some(mtok(6.0)),
-            output_above_200k: Some(mtok(22.50)),
-            cache_write_above_200k: Some(mtok(7.50)),
-            cache_read_above_200k: Some(mtok(0.60)),
-            fast_multiplier: 1.0,
-        },
+    // Sonnet 4.5: >200k tokens bill at a long-context premium.
+    ins(
+        "claude-sonnet-4-5",
+        ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30)).with_tiered(
+            mtok(6.0),
+            mtok(22.50),
+            mtok(7.50),
+            mtok(0.60),
+        ),
     );
 
-    // Opus 4.6
-    m.insert(
-        "claude-opus-4-6".into(),
-        ModelPricing {
-            input: mtok(5.0),
-            output: mtok(25.0),
-            cache_write: mtok(6.25),
-            cache_read: mtok(0.50),
-            cache_write_1h: None,
-            input_above_200k: Some(mtok(10.0)),
-            output_above_200k: Some(mtok(37.50)),
-            cache_write_above_200k: Some(mtok(12.50)),
-            cache_read_above_200k: Some(mtok(1.0)),
-            fast_multiplier: 6.0,
-        },
+    // Sonnet 4.6: 1M context at standard rates, no long-context premium.
+    ins(
+        "claude-sonnet-4-6",
+        ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30)),
+    );
+
+    // Opus 4.6+: 1M context at standard rates, no long-context premium.
+    // Fast mode: 6x on 4.6/4.7, 2x on 4.8.
+    ins(
+        "claude-opus-4-6",
+        ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)).with_fast(6.0),
+    );
+    ins(
+        "claude-opus-4-7",
+        ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)).with_fast(6.0),
+    );
+    ins(
+        "claude-opus-4-8",
+        ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)).with_fast(2.0),
+    );
+
+    // Fable 5: not in LiteLLM yet; rates from Anthropic's published pricing.
+    ins(
+        "claude-fable-5",
+        ModelPricing::new(mtok(10.0), mtok(50.0), mtok(12.50), mtok(1.0)),
     );
 
     m
@@ -124,32 +160,111 @@ const fn mtok(rate: f64) -> f64 {
     rate / 1_000_000.0
 }
 
-const MODEL_PREFIXES: &[&str] = &[
-    "anthropic/",
-    "claude-3-5-",
-    "claude-3-",
-    "claude-",
-    "openrouter/openai/",
-];
-
+/// Look up pricing for a model: exact match first, then a boundary-aware
+/// fuzzy match over all keys with the longest matching key winning.
 pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
-    let pricing = get_pricing();
-    if let Some(p) = pricing.get(model) {
+    lookup_in(get_pricing(), model)
+}
+
+pub(crate) fn lookup_in<'a>(
+    map: &'a HashMap<String, ModelPricing>,
+    model: &str,
+) -> Option<&'a ModelPricing> {
+    if let Some(p) = map.get(model) {
         return Some(p);
     }
-    for prefix in MODEL_PREFIXES {
-        let prefixed = format!("{}{}", prefix, model);
-        if let Some(p) = pricing.get(&prefixed) {
-            return Some(p);
+
+    let model_lower = model.to_ascii_lowercase();
+    if let Some(p) = map.get(model_lower.as_str()) {
+        return Some(p);
+    }
+
+    let normalized_model = normalize(&model_lower);
+
+    let mut best: Option<(&str, &ModelPricing)> = None;
+    for (key, pricing) in map.iter() {
+        if !pricing_key_matches(key, &model_lower, &normalized_model) {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            // Longest key wins; ties broken lexicographically for determinism.
+            Some((best_key, _)) => {
+                key.len() > best_key.len()
+                    || (key.len() == best_key.len() && key.as_str() < best_key)
+            }
+        };
+        if better {
+            best = Some((key, pricing));
         }
     }
-    let model_lower = model.to_lowercase();
-    for (key, p) in pricing.iter() {
-        if key.to_lowercase().contains(&model_lower) {
-            return Some(p);
-        }
+    best.map(|(_, p)| p)
+}
+
+/// Normalize a model identifier for matching: lowercase callers pass in,
+/// `.` and `@` become `-` (e.g. `claude-opus-4.8` -> `claude-opus-4-8`).
+pub(crate) fn normalize(value: &str) -> String {
+    value.replace(['.', '@'], "-")
+}
+
+fn pricing_key_matches(key: &str, model_lower: &str, normalized_model: &str) -> bool {
+    if contains_pricing_key(model_lower, key) || contains_pricing_key(key, model_lower) {
+        return true;
     }
-    None
+    let normalized_key = normalize(key);
+    contains_pricing_key(normalized_model, &normalized_key)
+        || contains_pricing_key(&normalized_key, normalized_model)
+}
+
+/// Boundary-aware containment: `needle` must appear in `haystack` with
+/// non-alphanumeric characters (or string edges) on both sides, and must not
+/// be a numeric-version prefix of a longer version (see version_suffix_ok).
+fn contains_pricing_key(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    let hb = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let begin = start + pos;
+        let end = begin + needle.len();
+        let before_ok = begin == 0 || !hb[begin - 1].is_ascii_alphanumeric();
+        let after_ok = end == hb.len() || !hb[end].is_ascii_alphanumeric();
+        if before_ok && after_ok && version_suffix_ok(needle, &haystack[end..]) {
+            return true;
+        }
+        start = begin + 1;
+    }
+    false
+}
+
+const MODEL_DATE_SUFFIX_DIGITS: usize = 8;
+
+/// Reject matches where the haystack continues a needle's numeric version:
+/// if the needle ends in a digit and the haystack continues with `-` or `.`
+/// followed by digits, that's a different version (e.g. `claude-opus-4.8`
+/// must not match `claude-opus-4`) — unless the digit run is exactly an
+/// 8-digit YYYYMMDD date alias (e.g. `claude-opus-4-20250514`).
+fn version_suffix_ok(needle: &str, rest: &str) -> bool {
+    if !needle.as_bytes().last().is_some_and(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    let rb = rest.as_bytes();
+    if rb.is_empty() || (rb[0] != b'-' && rb[0] != b'.') {
+        return true;
+    }
+    let digits = rb[1..].iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return true;
+    }
+    if digits == MODEL_DATE_SUFFIX_DIGITS {
+        match rb.get(1 + MODEL_DATE_SUFFIX_DIGITS) {
+            None => true,
+            Some(b) => !b.is_ascii_alphanumeric(),
+        }
+    } else {
+        false
+    }
 }
 
 const TIERED_THRESHOLD: u64 = 200_000;
@@ -439,5 +554,211 @@ mod tests {
     #[test]
     fn tiered_cost_no_tier_above_threshold_all_base() {
         assert_eq!(tiered_cost(300_000, 0.001, None), 300_000.0 * 0.001);
+    }
+
+    // --- lookup hardening (ported from ccusage) ---
+
+    #[test]
+    fn lookup_exact_match() {
+        let p = lookup_pricing("claude-opus-4-6").unwrap();
+        assert_eq!(p.input, mtok(5.0));
+        assert_eq!(p.output, mtok(25.0));
+    }
+
+    #[test]
+    fn lookup_model_inside_key() {
+        // "opus-4-6" appears in key "claude-opus-4-6" on a '-' boundary.
+        let p = lookup_pricing("opus-4-6").unwrap();
+        assert_eq!(p.input, mtok(5.0));
+    }
+
+    #[test]
+    fn lookup_key_inside_model() {
+        // Bedrock-style ids resolve against the bare builtin key.
+        let p = lookup_pricing("anthropic.claude-opus-4-7").unwrap();
+        assert_eq!(p.input, mtok(5.0));
+        assert_eq!(p.fast_multiplier, 6.0);
+    }
+
+    #[test]
+    fn lookup_case_insensitive() {
+        assert!(lookup_pricing("OPUS-4-6").is_some());
+    }
+
+    #[test]
+    fn lookup_unknown_model_none() {
+        assert!(lookup_pricing("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn opus_46_no_tier_fast_6x() {
+        let p = lookup_pricing("claude-opus-4-6").unwrap();
+        assert!(p.input_above_200k.is_none());
+        assert_eq!(p.fast_multiplier, 6.0);
+    }
+
+    #[test]
+    fn opus_47_and_48_rates() {
+        let p7 = lookup_pricing("claude-opus-4-7").unwrap();
+        assert_eq!(p7.input, mtok(5.0));
+        assert_eq!(p7.fast_multiplier, 6.0);
+        let p8 = lookup_pricing("claude-opus-4-8").unwrap();
+        assert_eq!(p8.input, mtok(5.0));
+        assert_eq!(p8.fast_multiplier, 2.0);
+    }
+
+    #[test]
+    fn fable_5_rates() {
+        let p = lookup_pricing("claude-fable-5").unwrap();
+        assert_eq!(p.input, mtok(10.0));
+        assert_eq!(p.output, mtok(50.0));
+        assert_eq!(p.cache_write, mtok(12.50));
+        assert_eq!(p.cache_read, mtok(1.0));
+        assert_eq!(p.fast_multiplier, 1.0);
+        assert!(p.input_above_200k.is_none());
+    }
+
+    #[test]
+    fn fable_5_bracket_variant_matches() {
+        // Claude Code reports e.g. "claude-fable-5[1m]"; the bracket is a
+        // non-alphanumeric boundary so the base key must match.
+        let p = lookup_pricing("claude-fable-5[1m]").unwrap();
+        assert_eq!(p.input, mtok(10.0));
+    }
+
+    #[test]
+    fn sonnet_46_no_tier_sonnet_45_keeps_tier() {
+        assert!(
+            lookup_pricing("claude-sonnet-4-6")
+                .unwrap()
+                .input_above_200k
+                .is_none()
+        );
+        assert_eq!(
+            lookup_pricing("claude-sonnet-4-5")
+                .unwrap()
+                .input_above_200k,
+            Some(mtok(6.0))
+        );
+    }
+
+    #[test]
+    fn dot_alias_resolves() {
+        // claude-opus-4.8 must resolve to claude-opus-4-8, NOT fall back to
+        // any claude-opus-4 entry.
+        let p = lookup_pricing("claude-opus-4.8").unwrap();
+        assert_eq!(p.fast_multiplier, 2.0);
+        assert_eq!(p.input, mtok(5.0));
+    }
+
+    #[test]
+    fn dot_alias_with_provider_prefix_resolves() {
+        let p = lookup_pricing("openrouter/anthropic/claude-opus-4.7").unwrap();
+        assert_eq!(p.input, mtok(5.0));
+        assert_eq!(p.fast_multiplier, 6.0);
+    }
+
+    #[test]
+    fn date_suffix_matches_base_key() {
+        // 8-digit date suffixes are aliases of the base key.
+        let p = lookup_pricing("claude-haiku-4-5-20251001").unwrap();
+        assert_eq!(p.input, mtok(1.0));
+    }
+
+    #[test]
+    fn version_suffix_rejected() {
+        // "claude-opus-4.70" must not match claude-opus-4-7 (the digit run
+        // continues the version past the key).
+        assert!(lookup_pricing("claude-opus-4.70").is_none());
+    }
+
+    #[test]
+    fn no_substring_match_without_boundary() {
+        // Alphanumeric chars hugging the key on either side are not a match.
+        assert!(lookup_pricing("xclaude-opus-4-6x").is_none());
+    }
+
+    #[test]
+    fn longest_key_wins() {
+        let mut map = builtin_pricing();
+        map.insert(
+            "claude-haiku-4-5-20251001".to_string(),
+            ModelPricing::new(mtok(2.0), mtok(5.0), mtok(1.25), mtok(0.10)),
+        );
+        // The model matches both the dated key (date-alias rule) and the base
+        // key; the longer dated key must win deterministically.
+        let p = lookup_in(&map, "claude-haiku-4-5-20251001-v9").unwrap();
+        assert_eq!(p.input, mtok(2.0));
+    }
+
+    #[test]
+    fn equal_length_keys_tiebreak_lexicographic() {
+        let mut map = HashMap::new();
+        map.insert(
+            "claude-test-ab".to_string(),
+            ModelPricing::new(1.0, 0.0, 0.0, 0.0),
+        );
+        map.insert(
+            "claude-test-aa".to_string(),
+            ModelPricing::new(2.0, 0.0, 0.0, 0.0),
+        );
+        // Both keys match on boundaries; equal length, so the
+        // lexicographically smaller key (claude-test-aa) wins.
+        let p = lookup_in(&map, "claude-test-aa.claude-test-ab").unwrap();
+        assert_eq!(p.input, 2.0);
+    }
+
+    #[test]
+    fn exact_builtin_hit_shields_from_regional_keys() {
+        // LiteLLM carries regional Bedrock variants at different prices
+        // (us.* is +10%). A bare model id must exact-hit the builtin key,
+        // never fuzzy-resolve to a regional entry.
+        let mut map = builtin_pricing();
+        map.insert(
+            "anthropic.claude-opus-4-7".to_string(),
+            ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)),
+        );
+        map.insert(
+            "us.anthropic.claude-opus-4-7".to_string(),
+            ModelPricing::new(mtok(5.5), mtok(27.5), mtok(6.875), mtok(0.55)),
+        );
+        assert_eq!(lookup_in(&map, "claude-opus-4-7").unwrap().input, mtok(5.0));
+        // Regional ids still resolve to their own entries.
+        assert_eq!(
+            lookup_in(&map, "us.anthropic.claude-opus-4-7")
+                .unwrap()
+                .input,
+            mtok(5.5)
+        );
+    }
+
+    // --- merge semantics ---
+
+    #[test]
+    fn dynamic_entries_override_builtin() {
+        let mut map = builtin_pricing();
+        let mut dynamic = HashMap::new();
+        dynamic.insert(
+            "claude-opus-4-6".to_string(),
+            ModelPricing::new(mtok(7.0), mtok(25.0), mtok(6.25), mtok(0.50)),
+        );
+        map.extend(dynamic);
+        assert_eq!(lookup_in(&map, "claude-opus-4-6").unwrap().input, mtok(7.0));
+        // Untouched keys keep builtin rates.
+        assert_eq!(lookup_in(&map, "claude-opus-4-7").unwrap().input, mtok(5.0));
+    }
+
+    #[test]
+    fn builtin_only_models_survive_merge() {
+        // fable-5 is not in LiteLLM; merging a dynamic table on top of the
+        // builtin floor must not lose it.
+        let mut map = builtin_pricing();
+        let mut dynamic = HashMap::new();
+        dynamic.insert(
+            "claude-opus-4-7".to_string(),
+            ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)),
+        );
+        map.extend(dynamic);
+        assert_eq!(lookup_in(&map, "claude-fable-5").unwrap().input, mtok(10.0));
     }
 }
