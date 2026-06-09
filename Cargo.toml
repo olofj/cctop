@@ -6,7 +6,7 @@ license = "MIT"
 description = "Live terminal monitor for Claude Code token usage"
 
 [dependencies]
-time = { version = "0.3", features = ["parsing", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "6"
@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = "2"
 walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

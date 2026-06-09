@@ -1149,7 +1149,7 @@ mod tests {
         // Total should be approximately preserved (smoothing rounds u64)
         let total: u64 = buckets.iter().map(|b| b.input_tokens).sum();
         assert!(
-            total >= 900 && total <= 1100,
+            (900..=1100).contains(&total),
             "total {total} should be ~1000"
         );
     }
@@ -1419,7 +1419,6 @@ mod tests {
                 output_tokens: 0,
                 cache_tokens: 0,
                 cost: 0.0,
-                ..Default::default()
             };
             5
         ];
@@ -1437,7 +1436,6 @@ mod tests {
             output_tokens: 0,
             cache_tokens: 0,
             cost: 0.0,
-            ..Default::default()
         }];
         smooth_buckets(&mut buckets);
         assert_eq!(buckets[0].input_tokens, 1000);

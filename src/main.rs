@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Olof Johansson
 
-mod app;
-mod discovery;
-mod model_costs;
-mod pricing;
-mod types;
-mod ui;
-mod watcher;
-
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -20,9 +12,10 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use time::OffsetDateTime;
 
-use app::AppState;
-use discovery::get_claude_paths;
-use types::WindowSize;
+use cctop::app::AppState;
+use cctop::discovery::{self, get_claude_paths};
+use cctop::types::{self, WindowSize};
+use cctop::{model_costs, pricing, ui, watcher};
 
 #[derive(Parser)]
 #[command(name = "cctop", about = "Live Claude Code token monitor", version)]
