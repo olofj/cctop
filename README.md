@@ -20,8 +20,9 @@ think top(1) for your Claude Code spend.
   (green = input, blue = output, magenta = cache)
 - **Configurable sliding window**: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
 - **Wall-clock-quantized bucketing** so the chart slides smoothly instead of jittering
-- **Fast startup**: tail-reads the last 512KB of each JSONL file, even for
-  sessions with hundreds of megabytes of history
+- **Fast startup**: skips files untouched for 24h and tail-reads the rest,
+  growing each tail just enough to cover the window — sessions with hundreds
+  of megabytes of history don't slow it down
 - **Live pricing**: Claude rates from LiteLLM's pricing database, cached for
   24h under `~/.cache/cctop/`, merged on top of a built-in fallback table;
   tiered >200k pricing, 5m/1h cache-write rates, and fast-mode multipliers

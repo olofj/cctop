@@ -32,6 +32,11 @@ struct FileState {
 /// Initial tail-read size (512 KB).
 const INITIAL_TAIL_BYTES: u64 = 512 * 1024;
 
+/// Upper bound for the growing tail read (64 MB). A file whose last 24h of
+/// records exceed this is read partially; the live watcher picks up
+/// everything from there on.
+const MAX_TAIL_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Parse a single JSONL line into a TokenEntry if it contains token usage data.
 fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
     // Fast pre-filter: skip lines that can't contain token usage
@@ -145,9 +150,13 @@ fn tail_read_file(
         return (entries, 0);
     }
 
-    // Try progressively larger tails to find enough data
+    // Grow the tail until it provably covers the retention window: either it
+    // reaches the start of the file, or it contains an entry older than the
+    // cutoff (transcripts are time-ordered, so everything before that line
+    // is older still). Capped so a pathological single file can't stall
+    // startup indefinitely.
     let mut tail_bytes = INITIAL_TAIL_BYTES;
-    for _ in 0..4 {
+    loop {
         entries.clear();
 
         let start_offset = file_len.saturating_sub(tail_bytes);
@@ -167,41 +176,31 @@ fn tail_read_file(
         }
 
         let mut line = String::new();
-        let mut earliest_in_range: Option<OffsetDateTime> = None;
+        let mut oldest_seen: Option<OffsetDateTime> = None;
 
         loop {
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => {
-                    if let Some(entry) = parse_line(line.trim(), identity)
-                        && entry.timestamp >= cutoff
-                    {
-                        if earliest_in_range.is_none_or(|t| entry.timestamp < t) {
-                            earliest_in_range = Some(entry.timestamp);
+                    if let Some(entry) = parse_line(line.trim(), identity) {
+                        if oldest_seen.is_none_or(|t| entry.timestamp < t) {
+                            oldest_seen = Some(entry.timestamp);
                         }
-                        entries.push(entry);
+                        if entry.timestamp >= cutoff {
+                            entries.push(entry);
+                        }
                     }
                 }
                 Err(_) => break,
             }
         }
 
-        // If we started at the beginning or found entries not at the boundary, we have enough
-        if start_offset == 0 {
+        let covers_window = start_offset == 0 || oldest_seen.is_some_and(|t| t < cutoff);
+        if covers_window || tail_bytes >= MAX_TAIL_BYTES {
             break;
         }
-
-        // If all entries we found are within range and the earliest is right at the
-        // cutoff boundary, we might be missing older entries — try a larger tail
-        if earliest_in_range.is_some_and(|t| t <= cutoff + time::Duration::seconds(10))
-            && tail_bytes < file_len
-        {
-            tail_bytes *= 2;
-            continue;
-        }
-
-        break;
+        tail_bytes *= 2;
     }
 
     (entries, file_len)
@@ -426,5 +425,78 @@ mod parse_tests {
         let e = parse_line(&line, &identity()).unwrap();
         assert_eq!(e.model, "claude-opus-4-6-fast");
         assert!(e.has_speed);
+    }
+
+    // --- tail_read_file window coverage ---
+
+    fn usage_line(ts: OffsetDateTime, msg_id: &str, pad: usize) -> String {
+        format!(
+            r#"{{"timestamp":"{}","pad":"{}","requestId":"r-{}","message":{{"usage":{{"input_tokens":10,"output_tokens":1}},"model":"claude-haiku-4-5","id":"{}"}}}}"#,
+            ts.format(&Rfc3339).unwrap(),
+            "x".repeat(pad),
+            msg_id,
+            msg_id
+        )
+    }
+
+    #[test]
+    fn tail_read_grows_until_window_covered() {
+        // All entries are inside the retention window and the file is larger
+        // than the initial 512KB tail: the tail must keep growing until it
+        // reaches the start of the file, not stop after the first read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.jsonl");
+        let now = OffsetDateTime::now_utc();
+        let cutoff = now - time::Duration::hours(24);
+
+        let n = 1200usize;
+        let mut content = String::new();
+        for i in 0..n {
+            content.push_str(&usage_line(
+                now - time::Duration::seconds(i as i64),
+                &format!("m{i}"),
+                600,
+            ));
+            content.push('\n');
+        }
+        assert!(content.len() as u64 > INITIAL_TAIL_BYTES);
+        std::fs::write(&path, &content).unwrap();
+
+        let (entries, offset) = tail_read_file(&path, &identity(), cutoff);
+        assert_eq!(entries.len(), n, "every in-window line must be read");
+        assert_eq!(offset, content.len() as u64);
+    }
+
+    #[test]
+    fn tail_read_stops_at_pre_cutoff_data() {
+        // Old records preceding the window prove coverage: only the recent
+        // entries come back, and the old ones are filtered out.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.jsonl");
+        let now = OffsetDateTime::now_utc();
+        let cutoff = now - time::Duration::hours(24);
+
+        let mut content = String::new();
+        for i in 0..1000usize {
+            content.push_str(&usage_line(
+                now - time::Duration::hours(48) - time::Duration::seconds(i as i64),
+                &format!("old{i}"),
+                600,
+            ));
+            content.push('\n');
+        }
+        for i in 0..10usize {
+            content.push_str(&usage_line(
+                now - time::Duration::seconds(i as i64),
+                &format!("new{i}"),
+                600,
+            ));
+            content.push('\n');
+        }
+        std::fs::write(&path, &content).unwrap();
+
+        let (entries, _) = tail_read_file(&path, &identity(), cutoff);
+        assert_eq!(entries.len(), 10);
+        assert!(entries.iter().all(|e| e.timestamp >= cutoff));
     }
 }
