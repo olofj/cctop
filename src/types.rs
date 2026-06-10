@@ -285,7 +285,8 @@ pub struct DisplayRow {
     pub input_per_min: f64,
     pub output_per_min: f64,
     pub cost_per_min: f64,
-    pub cost_today: f64,
+    /// Total cost within the current display window (the $TOTAL column).
+    pub cost_window: f64,
     pub last_activity: Option<OffsetDateTime>,
     pub is_expanded: bool,
     pub depth: u8,

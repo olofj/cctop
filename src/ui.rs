@@ -240,7 +240,7 @@ fn render_table(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
                 Cell::from(format_rate(row.output_per_min)),
                 Cell::from(format_cost(row.cost_per_min))
                     .style(Style::default().fg(cost_color(row.cost_per_min))),
-                Cell::from(format_cost_total(row.cost_today)),
+                Cell::from(format_cost_total(row.cost_window)),
                 Cell::from(format_relative_time(row.last_activity, now)),
             ];
 

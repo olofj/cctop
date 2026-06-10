@@ -217,7 +217,7 @@ fn initial_scan_end_to_end() {
     let rows = app.rows(now);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, "/test/proj");
-    assert!((rows[0].cost_today - expected).abs() < 1e-12);
+    assert!((rows[0].cost_window - expected).abs() < 1e-12);
 }
 
 #[test]
