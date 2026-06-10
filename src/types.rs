@@ -234,18 +234,21 @@ impl WindowSize {
         }
     }
 
-    pub fn from_str_loose(s: &str) -> Self {
+    /// Parse a window argument. Accepts the canonical labels plus a few
+    /// loose aliases; anything else is an error (a silent default would
+    /// make a typo look like a 5m measurement).
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "1m" | "1" => Self::W1m,
-            "5m" | "5" => Self::W5m,
-            "15m" | "15" => Self::W15m,
-            "30m" | "30" => Self::W30m,
-            "1h" | "60m" | "60" => Self::W1h,
-            "2h" | "120m" => Self::W2h,
-            "4h" | "240m" => Self::W4h,
-            "8h" => Self::W8h,
-            "24h" => Self::W24h,
-            _ => Self::W5m,
+            "1m" | "1" => Some(Self::W1m),
+            "5m" | "5" => Some(Self::W5m),
+            "15m" | "15" => Some(Self::W15m),
+            "30m" | "30" => Some(Self::W30m),
+            "1h" | "60m" | "60" => Some(Self::W1h),
+            "2h" | "120m" => Some(Self::W2h),
+            "4h" | "240m" => Some(Self::W4h),
+            "8h" => Some(Self::W8h),
+            "24h" => Some(Self::W24h),
+            _ => None,
         }
     }
 }
@@ -408,6 +411,21 @@ impl GraphMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_parse_accepts_labels_and_aliases() {
+        assert_eq!(WindowSize::parse("5m"), Some(WindowSize::W5m));
+        assert_eq!(WindowSize::parse("5"), Some(WindowSize::W5m));
+        assert_eq!(WindowSize::parse("60m"), Some(WindowSize::W1h));
+        assert_eq!(WindowSize::parse("24h"), Some(WindowSize::W24h));
+    }
+
+    #[test]
+    fn window_parse_rejects_garbage() {
+        assert_eq!(WindowSize::parse("7m"), None);
+        assert_eq!(WindowSize::parse(""), None);
+        assert_eq!(WindowSize::parse("fast"), None);
+    }
 
     #[test]
     fn cache_creation_count_prefers_breakdown() {

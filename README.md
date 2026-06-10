@@ -22,8 +22,12 @@ think top(1) for your Claude Code spend.
 - **Wall-clock-quantized bucketing** so the chart slides smoothly instead of jittering
 - **Fast startup**: tail-reads the last 512KB of each JSONL file, even for
   sessions with hundreds of megabytes of history
-- **Full pricing table**: 70+ Claude model variants with tiered pricing and
-  fast-mode multipliers
+- **Live pricing**: Claude rates from LiteLLM's pricing database, cached for
+  24h under `~/.cache/cctop/`, merged on top of a built-in fallback table;
+  tiered >200k pricing, 5m/1h cache-write rates, and fast-mode multipliers
+- **Accurate counting**: upstream-ccusage dedup semantics — streamed partial
+  writes, sidechain replays, and progress-wrapped subagent records all
+  collapse to the most complete copy
 - **Keyboard-driven**: vim-style navigation (hjkl), sort cycling, collapse all
 
 ## Prerequisites
@@ -81,9 +85,12 @@ cctop [OPTIONS]
 Options:
   -w, --window <WINDOW>    Initial time window [default: 5m]
                            Values: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
+                           (anything else is an error)
   -p, --project <PROJECT>  Filter to projects matching this substring
       --list-projects      List all discovered projects and exit
       --tick-rate <MS>     UI refresh interval in milliseconds [default: 3000]
+  -O, --offline            Use built-in pricing only (skip the LiteLLM
+                           fetch and cache)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -146,9 +153,19 @@ sessions can be expanded further to show subagent activity.
 Claude Code stores per-session token usage in JSONL files under
 `~/.claude/projects/`. cctop discovers these files, tail-reads recent entries
 on startup, then uses inotify to watch for new data in real-time. Each JSONL
-line containing `input_tokens` is parsed, costed against the pricing table,
-and fed into a time-windowed in-memory store. The TUI renders at 4 Hz,
-recomputing rates and histograms from the windowed data.
+line containing `input_tokens` is parsed (including `type:"progress"` wrapper
+lines from subagent transcripts), costed, and merged into a deduplicated
+time-windowed in-memory store; a more complete duplicate arriving later
+replaces its sibling so rates correct themselves retroactively. The TUI
+re-renders on each tick (3s by default) and immediately after input.
+
+Pricing comes from LiteLLM's community pricing database: a copy is cached
+under `~/.cache/cctop/litellm-pricing.json` and refreshed when older than
+24h, so startup never waits on the network when the cache is fresh; if the
+network is down a stale cache is used, and a small built-in table covers
+current models as the offline floor (it also covers models LiteLLM doesn't
+list yet). Records whose model has no pricing entry count as $0 and the
+model names are reported when cctop exits.
 
 ## Acknowledgments
 

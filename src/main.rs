@@ -53,7 +53,14 @@ impl Drop for TerminalGuard {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    let window = WindowSize::from_str_loose(&cli.window);
+    let window = match WindowSize::parse(&cli.window) {
+        Some(w) => w,
+        None => {
+            eprintln!("error: invalid --window value '{}'", cli.window);
+            eprintln!("       valid: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h");
+            std::process::exit(2);
+        }
+    };
     let tick_rate = Duration::from_millis(cli.tick_rate);
 
     // Discover Claude config paths
