@@ -188,9 +188,12 @@ fn tail_read_file(
     }
 
     // Grow the tail until it provably covers the retention window: either it
-    // reaches the start of the file, or it contains an entry older than the
-    // cutoff (transcripts are time-ordered, so everything before that line
-    // is older still). Capped so a pathological single file can't stall
+    // reaches the start of the file, or its FIRST parsed entry is older than
+    // the cutoff (transcripts are time-ordered, so everything before that
+    // line is older still). The first entry — not the minimum over all of
+    // them — because progress-wrapper replays carry the replayed message's
+    // original timestamp, and one old replay near the end of the tail must
+    // not fake coverage. Capped so a pathological single file can't stall
     // startup indefinitely.
     let mut tail_bytes = INITIAL_TAIL_BYTES;
     loop {
@@ -221,7 +224,7 @@ fn tail_read_file(
         }
 
         let mut buf: Vec<u8> = Vec::new();
-        let mut oldest_seen: Option<OffsetDateTime> = None;
+        let mut first_parsed: Option<OffsetDateTime> = None;
 
         loop {
             buf.clear();
@@ -236,8 +239,8 @@ fn tail_read_file(
                         continue;
                     };
                     if let Some(entry) = parse_line(line.trim(), identity) {
-                        if oldest_seen.is_none_or(|t| entry.timestamp < t) {
-                            oldest_seen = Some(entry.timestamp);
+                        if first_parsed.is_none() {
+                            first_parsed = Some(entry.timestamp);
                         }
                         if entry.timestamp >= cutoff {
                             entries.push(entry);
@@ -248,7 +251,7 @@ fn tail_read_file(
             }
         }
 
-        let covers_window = start_offset == 0 || oldest_seen.is_some_and(|t| t < cutoff);
+        let covers_window = start_offset == 0 || first_parsed.is_some_and(|t| t < cutoff);
         if covers_window || tail_bytes >= MAX_TAIL_BYTES {
             return (entries, consumed);
         }
@@ -723,6 +726,46 @@ mod parse_tests {
         let (entries, _) = tail_read_file(&path, &identity(), cutoff);
         assert_eq!(entries.len(), 10);
         assert!(entries.iter().all(|e| e.timestamp >= cutoff));
+    }
+
+    #[test]
+    fn tail_read_old_replay_near_end_does_not_fake_coverage() {
+        // A >512KB file of in-window entries whose tail also contains ONE
+        // old-timestamped line (a progress-wrapper replay carries the
+        // replayed message's original timestamp). Coverage must be decided
+        // by the positionally-first entry, so the tail keeps growing and
+        // every in-window line before the initial 512KB window is found.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.jsonl");
+        let now = OffsetDateTime::now_utc();
+        let cutoff = now - time::Duration::hours(24);
+
+        let n = 1200usize;
+        let mut content = String::new();
+        for i in 0..n {
+            content.push_str(&usage_line(
+                now - time::Duration::seconds(i as i64),
+                &format!("m{i}"),
+                600,
+            ));
+            content.push('\n');
+        }
+        // The replay: an old timestamp at the very end of the file.
+        content.push_str(&usage_line(
+            now - time::Duration::hours(48),
+            "replayed",
+            600,
+        ));
+        content.push('\n');
+        assert!(content.len() as u64 > INITIAL_TAIL_BYTES);
+        std::fs::write(&path, &content).unwrap();
+
+        let (entries, _) = tail_read_file(&path, &identity(), cutoff);
+        assert_eq!(
+            entries.len(),
+            n,
+            "all in-window lines must be read despite the old replay at the tail"
+        );
     }
 
     #[test]
