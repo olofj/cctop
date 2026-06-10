@@ -35,6 +35,10 @@ struct Cli {
     /// UI refresh interval in milliseconds
     #[arg(long, default_value = "3000")]
     tick_rate: u64,
+
+    /// Use built-in pricing only (skip the LiteLLM fetch and cache)
+    #[arg(short = 'O', long)]
+    offline: bool,
 }
 
 /// RAII guard for terminal cleanup.
@@ -74,8 +78,9 @@ fn main() -> io::Result<()> {
         std::process::exit(0);
     }
 
-    // Load model pricing (download → cache → built-in fallback)
-    let (pricing_map, pricing_source) = model_costs::load_model_pricing();
+    // Load model pricing (fresh cache → download → stale cache → built-in
+    // floor); the dynamic entries merge on top of the builtin table.
+    let (pricing_map, pricing_source) = model_costs::load_model_pricing(cli.offline);
     pricing::set_pricing(pricing_map);
 
     // Print startup info before entering TUI

@@ -160,6 +160,25 @@ const fn mtok(rate: f64) -> f64 {
     rate / 1_000_000.0
 }
 
+/// Fast-mode price multipliers, matched against the dot/@-normalized model
+/// identifier. Some LiteLLM entries carry the multiplier in
+/// provider_specific_entry.fast; this table covers the ones that don't
+/// (e.g. the anthropic.* Bedrock aliases).
+const FAST_MULTIPLIER_OVERRIDES: &[(&str, f64)] = &[
+    ("claude-opus-4-6", 6.0),
+    ("claude-opus-4-7", 6.0),
+    ("claude-opus-4-8", 2.0),
+];
+
+pub(crate) fn fast_multiplier_for(normalized_key: &str) -> f64 {
+    for (pattern, multiplier) in FAST_MULTIPLIER_OVERRIDES {
+        if contains_pricing_key(normalized_key, pattern) {
+            return *multiplier;
+        }
+    }
+    1.0
+}
+
 /// Look up pricing for a model: exact match first, then a boundary-aware
 /// fuzzy match over all keys with the longest matching key winning.
 pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
@@ -746,6 +765,15 @@ mod tests {
         assert_eq!(lookup_in(&map, "claude-opus-4-6").unwrap().input, mtok(7.0));
         // Untouched keys keep builtin rates.
         assert_eq!(lookup_in(&map, "claude-opus-4-7").unwrap().input, mtok(5.0));
+    }
+
+    #[test]
+    fn fast_multiplier_override_matching() {
+        assert_eq!(fast_multiplier_for("claude-opus-4-6"), 6.0);
+        assert_eq!(fast_multiplier_for("anthropic-claude-opus-4-8"), 2.0);
+        // Boundary-aware: a longer numeric version must not match.
+        assert_eq!(fast_multiplier_for("claude-opus-4-60"), 1.0);
+        assert_eq!(fast_multiplier_for("claude-haiku-4-5"), 1.0);
     }
 
     #[test]
