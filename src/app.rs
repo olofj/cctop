@@ -904,17 +904,27 @@ fn push_deduped(
     //    when a sidechain entry is involved on either side.
     let msg_only_hash = dedupe_hash(&msg_id, None);
     if let Some(idxs) = index.get(&msg_only_hash) {
-        for &i in idxs {
+        let found = idxs.iter().copied().find(|&i| {
             let existing = &entries[i];
-            if existing.message_id.as_deref() == Some(msg_id.as_str())
+            existing.message_id.as_deref() == Some(msg_id.as_str())
                 && existing.request_id != entry.request_id
                 && (entry.is_sidechain == Some(true) || existing.is_sidechain == Some(true))
-            {
-                if should_replace(&entry, existing) {
-                    entries[i] = entry;
+        });
+        if let Some(i) = found {
+            if should_replace(&entry, &entries[i]) {
+                let had_request_id = entry.request_id.is_some();
+                entries[i] = entry;
+                // The replacement carries a different request id than the
+                // entry it evicted, so its exact key isn't indexed yet —
+                // register it or a later exact twin double-counts. The
+                // evicted entry's stale keys are inert: every lookup
+                // verifies field equality, not just hash equality. The
+                // message-id-only bucket already maps i.
+                if had_request_id {
+                    index.entry(exact_hash).or_default().push(i);
                 }
-                return;
             }
+            return;
         }
     }
 
@@ -1721,6 +1731,49 @@ mod tests {
             dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false),
         ]);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn exact_twin_after_fallback_replacement_still_collapses() {
+        // Replay scans first; the parent then replaces it via the
+        // message-id fallback (different request id). A later exact twin of
+        // the parent — routine when a resumed session re-copies the line —
+        // must still collapse instead of double-counting: the replacement's
+        // own (message_id, request_id) key has to be indexed.
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].request_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn larger_exact_twin_after_fallback_replacement_wins_in_place() {
+        // Same sequence, but the late twin is more complete: it must
+        // replace the survivor in place, not append.
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 250, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].input_tokens, 250);
+    }
+
+    #[test]
+    fn sidechain_twin_after_fallback_replacement_still_merges() {
+        // After the parent replaces the replay, the old replay key still
+        // points at the slot; a re-delivered replay copy must merge away
+        // via the fallback, not resurrect.
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].is_sidechain, None);
     }
 
     #[test]
