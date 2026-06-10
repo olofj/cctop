@@ -21,6 +21,11 @@ pub fn get_claude_paths() -> Vec<PathBuf> {
         if !paths.is_empty() {
             return paths;
         }
+        // An explicit override that matches nothing shouldn't be silently
+        // ignored — say so before falling back to the default locations.
+        eprintln!(
+            "warning: CLAUDE_CONFIG_DIR='{env_val}' contains no projects/ directory; using defaults"
+        );
     }
 
     let mut paths = Vec::new();
