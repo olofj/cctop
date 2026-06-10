@@ -6,6 +6,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
+use rustc_hash::FxHashMap;
+
 use crate::types::{RawRecord, Usage};
 
 #[derive(Debug, Clone)]
@@ -187,10 +189,28 @@ pub(crate) fn fast_multiplier_for(normalized_key: &str) -> f64 {
     1.0
 }
 
+/// Resolved model -> pricing memo. Real model ids rarely exact-hit the
+/// table (date suffixes, provider prefixes, bracket variants), and the
+/// fuzzy fallback scans every key — once per parsed line without this.
+/// Safe to cache because the active table never changes after the first
+/// lookup (set_pricing panics on late installs).
+static LOOKUP_MEMO: OnceLock<Mutex<FxHashMap<String, Option<&'static ModelPricing>>>> =
+    OnceLock::new();
+
 /// Look up pricing for a model: exact match first, then a boundary-aware
 /// fuzzy match over all keys with the longest matching key winning.
 pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
-    lookup_in(get_pricing(), model)
+    let memo = LOOKUP_MEMO.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Ok(guard) = memo.lock()
+        && let Some(hit) = guard.get(model)
+    {
+        return *hit;
+    }
+    let resolved = lookup_in(get_pricing(), model);
+    if let Ok(mut guard) = memo.lock() {
+        guard.insert(model.to_string(), resolved);
+    }
+    resolved
 }
 
 pub(crate) fn lookup_in<'a>(
