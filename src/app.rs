@@ -315,27 +315,34 @@ impl AppState {
         }
     }
 
-    /// Walk backward through rows to find the parent Project label.
-    fn find_parent_project(&self, from: usize) -> String {
-        for i in (0..from).rev() {
-            if self.rows_cache[i].kind == RowKind::Project {
-                return self.rows_cache[i].label.clone();
-            }
-        }
-        String::new()
-    }
-
-    /// Walk backward through rows to find the parent Session label.
-    fn find_parent_session(&self, from: usize) -> Option<String> {
-        for i in (0..from).rev() {
-            if self.rows_cache[i].kind == RowKind::Session {
-                return Some(self.rows_cache[i].label.clone());
-            }
-            if self.rows_cache[i].kind == RowKind::Project {
-                break;
+    /// Walk backward through rows to find the nearest ancestor of the given
+    /// kind. Only rows at a strictly shallower depth are ancestors — without
+    /// the depth check, a top-level row would pick up the previous sibling
+    /// subtree's children (e.g. a global model row in model view inheriting
+    /// the prior model's expanded project).
+    fn find_ancestor(&self, from: usize, kind: RowKind) -> Option<String> {
+        let mut depth = self.rows_cache.get(from)?.depth;
+        for row in self.rows_cache[..from].iter().rev() {
+            if row.depth < depth {
+                if row.kind == kind {
+                    return Some(row.label.clone());
+                }
+                depth = row.depth;
+                if depth == 0 {
+                    break;
+                }
             }
         }
         None
+    }
+
+    fn find_parent_project(&self, from: usize) -> String {
+        self.find_ancestor(from, RowKind::Project)
+            .unwrap_or_default()
+    }
+
+    fn find_parent_session(&self, from: usize) -> Option<String> {
+        self.find_ancestor(from, RowKind::Session)
     }
 
     /// Compute a filtered histogram showing only the selected entity's contribution.
@@ -1871,6 +1878,78 @@ mod tests {
         old_twin.timestamp = now;
         app.ingest(vec![old_twin]);
         assert_eq!(app.entries.len(), 2);
+    }
+
+    // --- Selection filter tests ---
+
+    #[test]
+    fn selected_filter_top_level_model_row_has_no_project() {
+        // Model view with model-a expanded: its project child row sits
+        // between the two top-level model rows. Selecting model-b must
+        // yield a global (projectless) filter, not inherit the sibling
+        // subtree's project.
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.view_mode = ViewMode::ByModel;
+        // Inside the window: model view only aggregates in-window entries,
+        // and an entry exactly at `now` sits on the quantized right edge.
+        let ts = now - time::Duration::seconds(10);
+        let mut a = make_entry("/proj-one", "s1", ts, 100);
+        a.model = "model-a".to_string();
+        a.cost = 9.0;
+        let mut b = make_entry("/proj-two", "s2", ts, 200);
+        b.model = "model-b".to_string();
+        b.cost = 1.0;
+        app.ingest(vec![a, b]);
+
+        app.rows(now);
+        app.selected = 0; // model-a (highest cost sorts first)
+        app.toggle_expand();
+        let idx = app
+            .rows(now)
+            .iter()
+            .position(|r| r.depth == 0 && r.label == "model-b")
+            .expect("model-b row");
+        app.selected = idx;
+
+        let sel = app.selected_filter().unwrap();
+        assert_eq!(
+            sel.project, "",
+            "global model row must not inherit a project"
+        );
+        assert_eq!(sel.model.as_deref(), Some("model-b"));
+    }
+
+    #[test]
+    fn selected_filter_session_row_resolves_its_own_project() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.ingest(vec![
+            make_entry("/proj-one", "s1", now, 100),
+            make_entry("/proj-two", "s2", now, 200),
+        ]);
+
+        // Expand both projects, then select the second project's session.
+        app.rows(now);
+        app.selected = 0;
+        app.toggle_expand();
+        let second_proj = app
+            .rows(now)
+            .iter()
+            .position(|r| r.kind == RowKind::Project && r.label == "/proj-two")
+            .expect("second project row");
+        app.selected = second_proj;
+        app.toggle_expand();
+        let sess_idx = app
+            .rows(now)
+            .iter()
+            .position(|r| r.kind == RowKind::Session && r.label.starts_with("s2"))
+            .expect("s2 session row");
+        app.selected = sess_idx;
+
+        let sel = app.selected_filter().unwrap();
+        assert_eq!(sel.project, "/proj-two");
+        assert_eq!(sel.session_id.as_deref(), Some("s2"));
     }
 
     // --- Prune test ---
