@@ -394,6 +394,64 @@ fn requestid_less_duplicates_collapse_keeping_larger() {
 }
 
 #[test]
+fn live_append_and_new_file_detected() {
+    use cctop::types::WatchEvent;
+    use std::time::{Duration, Instant};
+
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+
+    // One pre-existing file so the project dir is watched from the start.
+    let file_a = fx.session_file("-test-proj", "aaaa1111-0000-0000-0000-000000000000");
+    append_line(
+        &file_a,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m0"), Some("r0"))
+            .tokens(1, 1)
+            .build(),
+    );
+
+    let (initial, rx) = watcher::start(vec![fx.base.clone()], MAX_RETENTION_SECS);
+    assert_eq!(initial.len(), 1);
+
+    // Live append to the known file, plus a brand-new session file.
+    append_line(
+        &file_a,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r1"))
+            .tokens(10, 5)
+            .build(),
+    );
+    let file_b = fx.session_file("-test-proj", "bbbb2222-0000-0000-0000-000000000000");
+    append_line(
+        &file_b,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m2"), Some("r2"))
+            .tokens(20, 5)
+            .build(),
+    );
+
+    // Collect watcher deliveries until both messages arrive (no sleeps —
+    // bounded recv_timeout polls).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen: Vec<String> = Vec::new();
+    while Instant::now() < deadline && seen.len() < 2 {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(WatchEvent::NewEntries(entries)) => {
+                seen.extend(entries.iter().filter_map(|e| e.message_id.clone()));
+            }
+            Ok(WatchEvent::Error(_)) | Err(_) => {}
+        }
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        ["m1", "m2"],
+        "live append and new-file creation must both be delivered"
+    );
+}
+
+#[test]
 fn subagent_files_attributed_to_parent_session() {
     let fx = Fixture::new();
     let now = OffsetDateTime::now_utc();

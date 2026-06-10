@@ -27,6 +27,25 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 struct FileState {
     identity: FileIdentity,
     byte_offset: u64,
+    /// (dev, ino) of the file the offset refers to; None until first read.
+    /// A change means the path was replaced (rename-over, delete+recreate)
+    /// and the offset belongs to a different file.
+    signature: Option<(u64, u64)>,
+}
+
+/// File identity for replacement detection: (device, inode) on unix, (0, 0)
+/// elsewhere (replacement then falls back to the length heuristic alone).
+fn file_signature(meta: &std::fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
+    }
 }
 
 /// Initial tail-read size (512 KB).
@@ -98,14 +117,22 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
         Ok(f) => f,
         Err(_) => return entries,
     };
-
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    if file_len <= state.byte_offset {
-        // File hasn't grown (or was truncated)
-        if file_len < state.byte_offset {
-            state.byte_offset = 0; // Reset on truncation
-        }
+    let Ok(meta) = file.metadata() else {
         return entries;
+    };
+    let file_len = meta.len();
+
+    // Replaced file (different inode) or in-place truncation: the stored
+    // offset belongs to other content, so restart from the top — and keep
+    // going, since the event that revealed this may be the only one we get.
+    let signature = file_signature(&meta);
+    if state.signature.is_some_and(|s| s != signature) || file_len < state.byte_offset {
+        state.byte_offset = 0;
+    }
+    state.signature = Some(signature);
+
+    if file_len <= state.byte_offset {
+        return entries; // nothing new
     }
 
     let mut reader = BufReader::new(file);
@@ -235,6 +262,30 @@ pub fn start(
     claude_paths: Vec<PathBuf>,
     retention_secs: i64,
 ) -> (Vec<TokenEntry>, mpsc::Receiver<WatchEvent>) {
+    let (tx, rx) = mpsc::channel();
+
+    // Register watches BEFORE the initial scan: writes that land while we
+    // scan queue as events and are drained afterward, instead of falling
+    // into a scan-then-watch gap and going unnoticed until the next write.
+    let (notify_tx, notify_rx) = mpsc::channel();
+    let watcher = match RecommendedWatcher::new(notify_tx, Config::default()) {
+        Ok(mut w) => {
+            for dir in get_projects_dirs(&claude_paths) {
+                if let Err(e) = w.watch(&dir, RecursiveMode::Recursive) {
+                    let _ = tx.send(WatchEvent::Error(format!(
+                        "Failed to watch {}: {e}",
+                        dir.display()
+                    )));
+                }
+            }
+            Some(w)
+        }
+        Err(e) => {
+            let _ = tx.send(WatchEvent::Error(format!("Failed to create watcher: {e}")));
+            None
+        }
+    };
+
     let mut files = glob_usage_files(&claude_paths);
     // Deterministic scan order so the dedup merge downstream is reproducible
     // regardless of filesystem traversal order.
@@ -249,27 +300,29 @@ pub fn start(
         std::time::SystemTime::now() - std::time::Duration::from_secs(retention_secs as u64);
 
     for path in &files {
-        // Skip files not modified within the retention window
-        let dominated_by_mtime = path
-            .metadata()
-            .ok()
+        let meta = path.metadata().ok();
+        let signature = meta.as_ref().map(file_signature);
+        let identity = classify_file(path);
+
+        // Skip files not modified within the retention window, but still
+        // register them (at EOF) so the watcher tracks future writes.
+        let dominated_by_mtime = meta
+            .as_ref()
             .and_then(|m| m.modified().ok())
             .is_some_and(|mtime| mtime < mtime_cutoff);
         if dominated_by_mtime {
-            // Still register the file so the watcher can track future writes
-            let identity = classify_file(path);
-            let file_len = path.metadata().map(|m| m.len()).unwrap_or(0);
+            let file_len = meta.map(|m| m.len()).unwrap_or(0);
             file_states.insert(
                 path.clone(),
                 FileState {
                     identity,
                     byte_offset: file_len,
+                    signature,
                 },
             );
             continue;
         }
 
-        let identity = classify_file(path);
         let (entries, offset) = tail_read_file(path, &identity, cutoff);
 
         all_entries.extend(entries);
@@ -278,42 +331,42 @@ pub fn start(
             FileState {
                 identity,
                 byte_offset: offset,
+                signature,
             },
         );
     }
 
-    let rx = spawn_watcher(claude_paths, file_states);
+    spawn_event_loop(watcher, notify_rx, file_states, tx);
     (all_entries, rx)
 }
 
-/// Spawn the file watcher thread. Returns a receiver for WatchEvents.
-fn spawn_watcher(
-    claude_paths: Vec<PathBuf>,
+/// Incrementally read a (possibly not yet tracked) file in response to an
+/// event, creating its FileState on first sight.
+fn read_path(path: &Path, file_states: &mut HashMap<PathBuf, FileState>) -> Vec<TokenEntry> {
+    if let Some(state) = file_states.get_mut(path) {
+        return read_incremental(state);
+    }
+    let mut state = FileState {
+        identity: classify_file(path),
+        byte_offset: 0,
+        signature: None,
+    };
+    let entries = read_incremental(&mut state);
+    file_states.insert(path.to_path_buf(), state);
+    entries
+}
+
+/// Spawn the event-processing thread. The watcher was created and its
+/// directories registered before the initial scan; it moves in here so its
+/// registrations stay alive for the lifetime of the loop.
+fn spawn_event_loop(
+    watcher: Option<RecommendedWatcher>,
+    notify_rx: mpsc::Receiver<notify::Result<notify::Event>>,
     mut file_states: HashMap<PathBuf, FileState>,
-) -> mpsc::Receiver<WatchEvent> {
-    let (tx, rx) = mpsc::channel();
-    let projects_dirs = get_projects_dirs(&claude_paths);
-
+    tx: mpsc::Sender<WatchEvent>,
+) {
     thread::spawn(move || {
-        // Set up notify watcher
-        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-
-        let mut watcher = match RecommendedWatcher::new(notify_tx, Config::default()) {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = tx.send(WatchEvent::Error(format!("Failed to create watcher: {e}")));
-                return;
-            }
-        };
-
-        for dir in &projects_dirs {
-            if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                let _ = tx.send(WatchEvent::Error(format!(
-                    "Failed to watch {}: {e}",
-                    dir.display()
-                )));
-            }
-        }
+        let _watcher = watcher;
 
         // Process file system events
         for event in notify_rx {
@@ -329,20 +382,7 @@ fn spawn_watcher(
                 EventKind::Modify(_) | EventKind::Create(_) => {
                     for path in &event.paths {
                         if path.extension().is_some_and(|e| e == "jsonl") {
-                            let entries = if let Some(state) = file_states.get_mut(path) {
-                                read_incremental(state)
-                            } else {
-                                // New file — start tracking
-                                let identity = classify_file(path);
-                                let mut state = FileState {
-                                    identity,
-                                    byte_offset: 0,
-                                };
-                                let entries = read_incremental(&mut state);
-                                file_states.insert(path.clone(), state);
-                                entries
-                            };
-
+                            let entries = read_path(path, &mut file_states);
                             if !entries.is_empty()
                                 && tx.send(WatchEvent::NewEntries(entries)).is_err()
                             {
@@ -351,12 +391,18 @@ fn spawn_watcher(
                         }
                     }
                 }
+                EventKind::Remove(_) => {
+                    // Drop the stale state; if the path reappears it gets a
+                    // fresh FileState (and the inode check catches the case
+                    // where the Remove was coalesced away).
+                    for path in &event.paths {
+                        file_states.remove(path);
+                    }
+                }
                 _ => {}
             }
         }
     });
-
-    rx
 }
 
 #[cfg(test)]
@@ -474,6 +520,7 @@ mod parse_tests {
         let mut state = FileState {
             identity: identity_for(&path),
             byte_offset: 0,
+            signature: None,
         };
         let entries = read_incremental(&mut state);
         assert!(entries.is_empty());
@@ -501,6 +548,7 @@ mod parse_tests {
         let mut state = FileState {
             identity: identity_for(&path),
             byte_offset: 0,
+            signature: None,
         };
         assert!(read_incremental(&mut state).is_empty());
         assert_eq!(state.byte_offset, 0);
@@ -525,10 +573,83 @@ mod parse_tests {
         let mut state = FileState {
             identity: identity_for(&path),
             byte_offset: 0,
+            signature: None,
         };
         let entries = read_incremental(&mut state);
         assert_eq!(entries.len(), 1);
         assert_eq!(state.byte_offset, content.len() as u64);
+    }
+
+    #[test]
+    fn truncated_file_read_in_same_pass() {
+        // In-place truncation (same inode, shorter length) must reset the
+        // offset AND read the new content immediately — the event that
+        // revealed the truncation may be the only one we get.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let now = OffsetDateTime::now_utc();
+
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                usage_line(now, "m1", 200),
+                usage_line(now, "m2", 200)
+            ),
+        )
+        .unwrap();
+        let mut state = FileState {
+            identity: identity_for(&path),
+            byte_offset: 0,
+            signature: None,
+        };
+        assert_eq!(read_incremental(&mut state).len(), 2);
+
+        // Truncate-and-rewrite shorter content in place (fs::write opens
+        // with O_TRUNC on the existing inode).
+        let replacement = format!("{}\n", usage_line(now, "m3", 0));
+        std::fs::write(&path, &replacement).unwrap();
+
+        let entries = read_incremental(&mut state);
+        assert_eq!(entries.len(), 1, "new content must be read immediately");
+        assert_eq!(entries[0].message_id.as_deref(), Some("m3"));
+        assert_eq!(state.byte_offset, replacement.len() as u64);
+    }
+
+    #[test]
+    fn replaced_file_read_from_start() {
+        // Delete + recreate (new inode) with content LONGER than the old
+        // offset: the length heuristic alone can't see this — the inode
+        // check must reset to 0 instead of reading from the stale offset.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let now = OffsetDateTime::now_utc();
+
+        let original = format!("{}\n", usage_line(now, "old", 0));
+        std::fs::write(&path, &original).unwrap();
+        let mut state = FileState {
+            identity: identity_for(&path),
+            byte_offset: 0,
+            signature: None,
+        };
+        assert_eq!(read_incremental(&mut state).len(), 1);
+
+        std::fs::remove_file(&path).unwrap();
+        let replacement = format!(
+            "{}\n{}\n{}\n",
+            usage_line(now, "n1", 100),
+            usage_line(now, "n2", 100),
+            usage_line(now, "n3", 100)
+        );
+        assert!(replacement.len() > original.len());
+        std::fs::write(&path, &replacement).unwrap();
+
+        let entries = read_incremental(&mut state);
+        let ids: Vec<_> = entries
+            .iter()
+            .map(|e| e.message_id.as_deref().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, ["n1", "n2", "n3"], "must read the whole new file");
     }
 
     // --- tail_read_file window coverage ---
