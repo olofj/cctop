@@ -436,6 +436,42 @@ mod parse_tests {
     }
 
     #[test]
+    fn parses_sanitized_verbatim_real_line() {
+        // A real Claude Code assistant line (ids and text sanitized) with
+        // every field the live format carries — pins the actual shape, not
+        // just the minimal fixture subset, so serde strictness regressions
+        // surface here.
+        let line = concat!(
+            r#"{"parentUuid":"b2c3d4e5-1111-2222-3333-444455556666","isSidechain":false,"#,
+            r#""userType":"external","cwd":"/home/olof/cctop","#,
+            r#""sessionId":"a513fce4-09ec-4a5f-9f9c-0daf00107f45","version":"3.1.2","#,
+            r#""gitBranch":"main","message":{"id":"msg_01SanitizedExample","#,
+            r#""type":"message","role":"assistant","model":"claude-fable-5[1m]","#,
+            r#""content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn","#,
+            r#""stop_sequence":null,"usage":{"input_tokens":4,"#,
+            r#""cache_creation_input_tokens":24205,"cache_read_input_tokens":11648,"#,
+            r#""cache_creation":{"ephemeral_5m_input_tokens":24205,"#,
+            r#""ephemeral_1h_input_tokens":0},"output_tokens":268,"#,
+            r#""service_tier":"standard","inference_geo":"not_available"}},"#,
+            r#""requestId":"req_011SanitizedExample","type":"assistant","#,
+            r#""uuid":"c3d4e5f6-7777-8888-9999-000011112222","#,
+            r#""timestamp":"2026-06-09T10:00:00.123Z"}"#
+        );
+        let e = parse_line(line, &identity()).unwrap();
+        assert_eq!(e.input_tokens, 4);
+        assert_eq!(e.output_tokens, 268);
+        assert_eq!(e.cache_write_tokens, 24205);
+        assert_eq!(e.cache_read_tokens, 11648);
+        assert_eq!(e.model, "claude-fable-5[1m]");
+        assert_eq!(e.message_id.as_deref(), Some("msg_01SanitizedExample"));
+        assert_eq!(e.request_id.as_deref(), Some("req_011SanitizedExample"));
+        assert_eq!(e.is_sidechain, Some(false));
+        // The bracketed model id resolves against the builtin table, so the
+        // computed cost is non-zero even offline.
+        assert!(e.cost > 0.0, "cost {} should be > 0", e.cost);
+    }
+
+    #[test]
     fn parses_progress_wrapper_line() {
         let line = r#"{"type":"progress","timestamp":"2026-06-09T10:00:00Z","isSidechain":true,
             "data":{"message":{"timestamp":"2026-06-09T10:00:01Z","requestId":"req_n",

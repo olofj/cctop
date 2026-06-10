@@ -228,13 +228,15 @@ fn cache_breakdown_drives_tokens_and_cost() {
 
     // 1h-dominant cache write, flat field present alongside the breakdown
     // (the live record shape): tokens must count 5m+1h, and cost must bill
-    // 1h at 2x input — not the flat field at the 5m rate.
+    // 1h at 2x input — not the flat field at the 5m rate. The flat field is
+    // a sentinel that differs from the breakdown sum, so reading the wrong
+    // field fails the token assertion too.
     append_line(
         &file,
         &format!(
             r#"{{"type":"assistant","timestamp":"{}","requestId":"r1",
                 "message":{{"usage":{{"input_tokens":0,"output_tokens":0,
-                    "cache_creation_input_tokens":300000,
+                    "cache_creation_input_tokens":999999,
                     "cache_creation":{{"ephemeral_5m_input_tokens":100000,
                                        "ephemeral_1h_input_tokens":200000}}}},
                     "model":"claude-haiku-4-5","id":"m1"}}}}"#,

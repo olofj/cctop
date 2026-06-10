@@ -1375,11 +1375,11 @@ mod tests {
             .unwrap()
             .0;
 
-        // The peak should have shifted left by one bucket (or fallen off edge)
+        // The entry is still well inside the 8h window, so nothing may
+        // have fallen off — and the peak must have shifted left by one.
         let total2: u64 = h2.iter().map(|b| b.input_tokens).sum();
-        if total2 > 0 {
-            assert_eq!(peak2 + 1, peak1, "peak should shift left by one bucket");
-        }
+        assert_eq!(total2, 1000, "tokens must be conserved across the slide");
+        assert_eq!(peak2 + 1, peak1, "peak should shift left by one bucket");
     }
 
     // --- Sparkline in row rebuild tests ---
@@ -1415,11 +1415,11 @@ mod tests {
             1000,
         )]);
 
+        // The project still gets a row (last-activity display) with an
+        // all-zero sparkline.
         let rows = app.rows(now);
-        // Project should still appear (it's in the entries deque) but sparkline all zeros
-        if !rows.is_empty() {
-            assert!(rows[0].sparkline.iter().all(|&v| v == 0));
-        }
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].sparkline.iter().all(|&v| v == 0));
     }
 
     #[test]
