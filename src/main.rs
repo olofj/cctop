@@ -156,14 +156,8 @@ fn main() -> io::Result<()> {
                 (KeyCode::Down | KeyCode::Char('j'), _) => app.select_down(),
                 (KeyCode::Home | KeyCode::Char('g'), _) => app.select_top(),
                 (KeyCode::End | KeyCode::Char('G'), _) => app.select_bottom(),
-                (KeyCode::PageUp, _) => {
-                    let page = terminal.size()?.height.saturating_sub(8) as usize;
-                    app.page_up(page);
-                }
-                (KeyCode::PageDown, _) => {
-                    let page = terminal.size()?.height.saturating_sub(8) as usize;
-                    app.page_down(page);
-                }
+                (KeyCode::PageUp, _) => app.page_up(app.visible_rows.max(1)),
+                (KeyCode::PageDown, _) => app.page_down(app.visible_rows.max(1)),
 
                 (KeyCode::Enter | KeyCode::Char(' '), _) => app.toggle_expand(),
 

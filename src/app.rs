@@ -48,6 +48,10 @@ pub struct AppState {
     /// Scroll offset for the table.
     pub scroll_offset: usize,
 
+    /// Rows visible in the table at the last render — the PgUp/PgDn page
+    /// size (the event loop can't know the layout's table split).
+    pub visible_rows: usize,
+
     /// Expanded tree keys (project paths and "project/session" keys).
     expanded: HashSet<String>,
 
@@ -92,6 +96,7 @@ impl AppState {
             selected: 0,
             selected_key: None,
             scroll_offset: 0,
+            visible_rows: 0,
             expanded: HashSet::new(),
             bar_color_mode: BarColorMode::TokenType,
             graph_metric: GraphMetric::Cost,
@@ -163,6 +168,7 @@ impl AppState {
 
     /// Adjust scroll offset to keep selection visible.
     pub fn adjust_scroll(&mut self, visible_rows: usize) {
+        self.visible_rows = visible_rows;
         if visible_rows == 0 {
             return;
         }
