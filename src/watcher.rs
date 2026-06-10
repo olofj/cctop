@@ -11,7 +11,6 @@ use std::sync::mpsc;
 use std::thread;
 
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use rustc_hash::FxHashSet;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -23,11 +22,11 @@ use crate::types::{FileIdentity, ProgressRecord, RawRecord, TokenEntry, WatchEve
 /// (e.g. "no response requested" notices); they carry no real usage.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
-/// Tracks read position and dedup state for a single JSONL file.
+/// Tracks the read position for a single JSONL file. Dedup happens in
+/// AppState, which sees candidates from all files; the watcher just parses.
 struct FileState {
     identity: FileIdentity,
     byte_offset: u64,
-    seen_hashes: FxHashSet<String>,
 }
 
 /// Initial tail-read size (512 KB).
@@ -68,12 +67,6 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
 
     let cost = calculate_cost(&record);
 
-    let dedup_key = format!(
-        "{}:{}",
-        record.message.id.as_deref().unwrap_or(""),
-        record.request_id.as_deref().unwrap_or("")
-    );
-
     Some(TokenEntry {
         timestamp,
         project: identity.project.clone(),
@@ -85,7 +78,6 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
         cache_write_tokens: record.message.usage.cache_creation_token_count(),
         cache_read_tokens: record.message.usage.cache_read_input_tokens,
         cost,
-        dedup_key,
         message_id: record.message.id.clone(),
         request_id: record.request_id.clone(),
         is_sidechain: record.is_sidechain,
@@ -122,9 +114,7 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                if let Some(entry) = parse_line(line.trim(), &state.identity)
-                    && state.seen_hashes.insert(entry.dedup_key.clone())
-                {
+                if let Some(entry) = parse_line(line.trim(), &state.identity) {
                     entries.push(entry);
                 }
             }
@@ -142,7 +132,6 @@ fn tail_read_file(
     path: &Path,
     identity: &FileIdentity,
     cutoff: OffsetDateTime,
-    seen: &mut FxHashSet<String>,
 ) -> (Vec<TokenEntry>, u64) {
     let mut entries = Vec::new();
 
@@ -191,9 +180,7 @@ fn tail_read_file(
                         if earliest_in_range.is_none_or(|t| entry.timestamp < t) {
                             earliest_in_range = Some(entry.timestamp);
                         }
-                        if seen.insert(entry.dedup_key.clone()) {
-                            entries.push(entry);
-                        }
+                        entries.push(entry);
                     }
                 }
                 Err(_) => break,
@@ -226,10 +213,12 @@ pub fn start(
     claude_paths: Vec<PathBuf>,
     retention_secs: i64,
 ) -> (Vec<TokenEntry>, mpsc::Receiver<WatchEvent>) {
-    let files = glob_usage_files(&claude_paths);
+    let mut files = glob_usage_files(&claude_paths);
+    // Deterministic scan order so the dedup merge downstream is reproducible
+    // regardless of filesystem traversal order.
+    files.sort();
     let mut all_entries = Vec::new();
     let mut file_states: HashMap<PathBuf, FileState> = HashMap::new();
-    let mut global_seen = FxHashSet::default();
 
     let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(retention_secs);
 
@@ -253,19 +242,13 @@ pub fn start(
                 FileState {
                     identity,
                     byte_offset: file_len,
-                    seen_hashes: FxHashSet::default(),
                 },
             );
             continue;
         }
 
         let identity = classify_file(path);
-        let (entries, offset) = tail_read_file(path, &identity, cutoff, &mut global_seen);
-
-        let mut file_seen = FxHashSet::default();
-        for entry in &entries {
-            file_seen.insert(entry.dedup_key.clone());
-        }
+        let (entries, offset) = tail_read_file(path, &identity, cutoff);
 
         all_entries.extend(entries);
         file_states.insert(
@@ -273,7 +256,6 @@ pub fn start(
             FileState {
                 identity,
                 byte_offset: offset,
-                seen_hashes: file_seen,
             },
         );
     }
@@ -333,7 +315,6 @@ fn spawn_watcher(
                                 let mut state = FileState {
                                     identity,
                                     byte_offset: 0,
-                                    seen_hashes: FxHashSet::default(),
                                 };
                                 let entries = read_incremental(&mut state);
                                 file_states.insert(path.clone(), state);

@@ -124,7 +124,6 @@ pub struct TokenEntry {
     pub cache_write_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost: f64,
-    pub dedup_key: String,
     // Dedup metadata (mirrors ccusage's ParsedEntry)
     pub message_id: Option<String>,
     pub request_id: Option<String>,

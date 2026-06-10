@@ -3,8 +3,10 @@
 //
 // Application state: windowed token data, aggregation, and row generation.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
+use rustc_hash::{FxHashMap, FxHasher};
 use time::OffsetDateTime;
 
 use crate::types::{
@@ -12,12 +14,21 @@ use crate::types::{
     SPARKLINE_BUCKETS, Selection, SortColumn, TokenEntry, ViewMode, WindowSize,
 };
 
-pub struct AppState {
-    /// Recent entries within the max retention window (24h), time-ordered.
-    entries: VecDeque<TokenEntry>,
+/// Minimum interval between prune sweeps. A sweep is O(entries) because the
+/// dedup index is rebuilt after compaction, so don't run it every tick.
+const PRUNE_INTERVAL_SECS: i64 = 60;
 
-    /// Global dedup hashes across all files.
-    seen_hashes: HashSet<String>,
+pub struct AppState {
+    /// Deduplicated entries within the max retention window (24h), in
+    /// arrival order. A better twin arriving later replaces its sibling
+    /// in place (see push_deduped).
+    entries: Vec<TokenEntry>,
+
+    /// Dedup index: hash of (message_id, request_id) -> entry indices.
+    dedup_index: FxHashMap<u64, Vec<usize>>,
+
+    /// Last time prune() actually swept.
+    last_prune: Option<OffsetDateTime>,
 
     /// Current display window.
     pub window: WindowSize,
@@ -69,8 +80,9 @@ pub struct AppState {
 impl AppState {
     pub fn new(window: WindowSize, project_filter: Option<String>) -> Self {
         Self {
-            entries: VecDeque::new(),
-            seen_hashes: HashSet::new(),
+            entries: Vec::new(),
+            dedup_index: FxHashMap::default(),
+            last_prune: None,
             window,
             sort_column: SortColumn::LastActivity,
             sort_ascending: false,
@@ -90,7 +102,9 @@ impl AppState {
         }
     }
 
-    /// Ingest new entries from the watcher, applying the project filter.
+    /// Ingest new entries from the watcher, applying the project filter and
+    /// the global dedup merge (which may replace already-stored entries with
+    /// a more complete twin; rows rebuild from storage on the next draw).
     pub fn ingest(&mut self, entries: Vec<TokenEntry>) {
         for entry in entries {
             // Apply project filter
@@ -99,22 +113,28 @@ impl AppState {
             {
                 continue;
             }
-            if !self.seen_hashes.insert(entry.dedup_key.clone()) {
-                continue;
-            }
-            self.entries.push_back(entry);
+            push_deduped(&mut self.entries, &mut self.dedup_index, entry);
         }
         self.cache_dirty = true;
     }
 
-    /// Prune entries older than the max retention window (24h).
+    /// Prune entries older than the max retention window (24h). Throttled:
+    /// the sweep compacts storage and rebuilds the dedup index, so it runs
+    /// at most once per PRUNE_INTERVAL_SECS.
     pub fn prune(&mut self, now: OffsetDateTime) {
+        if self
+            .last_prune
+            .is_some_and(|t| (now - t).whole_seconds() < PRUNE_INTERVAL_SECS)
+        {
+            return;
+        }
+        self.last_prune = Some(now);
+
         let cutoff = now - time::Duration::seconds(MAX_RETENTION_SECS);
         let old_len = self.entries.len();
-        while self.entries.front().is_some_and(|e| e.timestamp < cutoff) {
-            self.entries.pop_front();
-        }
+        self.entries.retain(|e| e.timestamp >= cutoff);
         if self.entries.len() != old_len {
+            rebuild_index(&self.entries, &mut self.dedup_index);
             self.cache_dirty = true;
         }
     }
@@ -831,6 +851,124 @@ impl AppState {
     }
 }
 
+// --- Dedup merge (mirrors ccusage's loader) ---
+
+fn dedupe_hash(message_id: &str, request_id: Option<&str>) -> u64 {
+    let mut h = FxHasher::default();
+    message_id.hash(&mut h);
+    request_id.hash(&mut h);
+    h.finish()
+}
+
+/// Insert an entry into the deduplicated set.
+///
+/// Dedup rules (mirroring upstream ccusage):
+/// - Entries without a message id are never deduplicated.
+/// - Exact key is (message_id, request_id); when request_id is absent the key
+///   degenerates to message_id alone, so repeated requestId-less writes of the
+///   same message collapse.
+/// - Sidechain replays: side-question logs replay parent messages with the
+///   same message id but a NEW request id. A message-id-only fallback lookup
+///   merges two entries with different request ids iff at least one of them
+///   is a sidechain entry. Two non-sidechain entries with the same message id
+///   but different request ids stay separate.
+fn push_deduped(
+    entries: &mut Vec<TokenEntry>,
+    index: &mut FxHashMap<u64, Vec<usize>>,
+    entry: TokenEntry,
+) {
+    let Some(msg_id) = entry.message_id.clone() else {
+        entries.push(entry);
+        return;
+    };
+
+    let exact_hash = dedupe_hash(&msg_id, entry.request_id.as_deref());
+
+    // 1. Exact (message_id, request_id) match. Verify field equality, not just
+    //    hash equality, since multiple indexes can share a bucket.
+    if let Some(idxs) = index.get(&exact_hash) {
+        for &i in idxs {
+            let existing = &entries[i];
+            if existing.message_id.as_deref() == Some(msg_id.as_str())
+                && existing.request_id == entry.request_id
+            {
+                if should_replace(&entry, existing) {
+                    entries[i] = entry;
+                }
+                return;
+            }
+        }
+    }
+
+    // 2. Message-id-only fallback: merge across differing request ids only
+    //    when a sidechain entry is involved on either side.
+    let msg_only_hash = dedupe_hash(&msg_id, None);
+    if let Some(idxs) = index.get(&msg_only_hash) {
+        for &i in idxs {
+            let existing = &entries[i];
+            if existing.message_id.as_deref() == Some(msg_id.as_str())
+                && existing.request_id != entry.request_id
+                && (entry.is_sidechain == Some(true) || existing.is_sidechain == Some(true))
+            {
+                if should_replace(&entry, existing) {
+                    entries[i] = entry;
+                }
+                return;
+            }
+        }
+    }
+
+    // No match: accept and index under both hashes (they coincide when
+    // request_id is None).
+    let has_request_id = entry.request_id.is_some();
+    let i = entries.len();
+    entries.push(entry);
+    index.entry(exact_hash).or_default().push(i);
+    if has_request_id {
+        index.entry(msg_only_hash).or_default().push(i);
+    }
+}
+
+/// Decide whether a colliding candidate should replace the existing entry.
+///
+/// Tiers: non-sidechain beats sidechain (the replayed copy can carry the
+/// parent's huge cache reads); then larger token total; then higher cost
+/// (a subagent file entry carries costUSD while its progress-line twin does
+/// not); then presence of a speed field.
+fn should_replace(candidate: &TokenEntry, existing: &TokenEntry) -> bool {
+    let cand_side = candidate.is_sidechain == Some(true);
+    let exist_side = existing.is_sidechain == Some(true);
+    if cand_side != exist_side {
+        return exist_side;
+    }
+    let cand_tokens = candidate.token_total();
+    let exist_tokens = existing.token_total();
+    if cand_tokens != exist_tokens {
+        return cand_tokens > exist_tokens;
+    }
+    if candidate.cost != existing.cost {
+        return candidate.cost > existing.cost;
+    }
+    candidate.has_speed && !existing.has_speed
+}
+
+/// Recompute the dedup index after storage compaction shifted indices.
+fn rebuild_index(entries: &[TokenEntry], index: &mut FxHashMap<u64, Vec<usize>>) {
+    index.clear();
+    for (i, e) in entries.iter().enumerate() {
+        let Some(msg_id) = e.message_id.as_deref() else {
+            continue;
+        };
+        index
+            .entry(dedupe_hash(msg_id, e.request_id.as_deref()))
+            .or_default()
+            .push(i);
+        if e.request_id.is_some() {
+            index.entry(dedupe_hash(msg_id, None)).or_default().push(i);
+        }
+    }
+}
+
 /// Compare two f64 values without panicking on NaN.
 fn f64_cmp(a: f64, b: f64) -> std::cmp::Ordering {
     a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
@@ -1101,11 +1239,6 @@ mod tests {
             cache_write_tokens: 0,
             cache_read_tokens: 0,
             cost: 0.01,
-            dedup_key: format!(
-                "{}:{}",
-                (ts.unix_timestamp() * 1000 + ts.millisecond() as i64),
-                input
-            ),
             message_id: Some(format!(
                 "m-{}-{}",
                 ts.unix_timestamp() * 1000 + ts.millisecond() as i64,
@@ -1115,6 +1248,42 @@ mod tests {
             is_sidechain: None,
             has_speed: false,
         }
+    }
+
+    /// Entry shaped for dedup tests (ccusage's make_entry).
+    fn dedup_entry(
+        msg_id: Option<&str>,
+        req_id: Option<&str>,
+        is_sidechain: Option<bool>,
+        tokens: u64,
+        cost: f64,
+        has_speed: bool,
+    ) -> TokenEntry {
+        TokenEntry {
+            timestamp: fixed_now(),
+            project: "/test".to_string(),
+            session_id: "s1".to_string(),
+            subagent_id: None,
+            model: "claude-opus-4-6".to_string(),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            cost,
+            message_id: msg_id.map(String::from),
+            request_id: req_id.map(String::from),
+            is_sidechain,
+            has_speed,
+        }
+    }
+
+    fn merge(entries: Vec<TokenEntry>) -> Vec<TokenEntry> {
+        let mut out = Vec::new();
+        let mut index = FxHashMap::default();
+        for e in entries {
+            push_deduped(&mut out, &mut index, e);
+        }
+        out
     }
 
     fn fixed_now() -> OffsetDateTime {
@@ -1449,7 +1618,7 @@ mod tests {
         assert_eq!(buckets[0].input_tokens, 1000);
     }
 
-    // --- Dedup test ---
+    // --- Dedup tests (merge rules ported from ccusage) ---
 
     #[test]
     fn ingest_deduplicates() {
@@ -1460,6 +1629,195 @@ mod tests {
         app.ingest(vec![entry, dup]);
         // Should only have one entry
         assert_eq!(app.entries.len(), 1);
+    }
+
+    #[test]
+    fn no_message_id_never_deduped() {
+        let result = merge(vec![
+            dedup_entry(None, None, None, 100, 0.0, false),
+            dedup_entry(None, None, None, 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn exact_key_collapses_duplicates() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn missing_request_id_collapses_on_message_id() {
+        // Third-party backends omit requestId; repeated writes of the same
+        // message must collapse, with the larger-token line surviving.
+        let result = merge(vec![
+            dedup_entry(Some("m1"), None, None, 100, 0.001, false),
+            dedup_entry(Some("m1"), None, None, 200, 0.002, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].input_tokens, 200);
+        assert_eq!(result[0].cost, 0.002);
+    }
+
+    #[test]
+    fn different_request_ids_stay_separate_without_sidechain() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r2"), None, 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn with_and_without_request_id_stay_separate_without_sidechain() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), None, None, 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn sidechain_replay_dropped_parent_first() {
+        // Parent read first; sidechain replay with a new request id and a huge
+        // cache read must be merged away, keeping the parent.
+        let parent = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false);
+        let mut replay = dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false);
+        replay.cache_read_tokens = 50_000;
+        let result = merge(vec![parent, replay]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cache_read_tokens, 0);
+        assert_eq!(result[0].is_sidechain, None);
+    }
+
+    #[test]
+    fn sidechain_replay_dropped_sidechain_first() {
+        // Order independence: replay read before the parent.
+        let mut replay = dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false);
+        replay.cache_read_tokens = 50_000;
+        let parent = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false);
+        let result = merge(vec![replay, parent]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cache_read_tokens, 0);
+        assert_eq!(result[0].is_sidechain, None);
+    }
+
+    #[test]
+    fn distinct_sidechain_messages_still_counted() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m2"), Some("r2"), Some(true), 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn two_sidechain_copies_collapse() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), Some(true), 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r2"), Some(true), 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn equal_tokens_higher_cost_wins() {
+        // Subagent-file entry carries costUSD; its cost-less progress twin
+        // must lose regardless of read order.
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.06, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cost, 0.06);
+
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.06, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].cost, 0.06);
+    }
+
+    #[test]
+    fn equal_tokens_and_cost_speed_wins() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, true),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].has_speed);
+    }
+
+    #[test]
+    fn larger_token_total_beats_cost() {
+        let result = merge(vec![
+            dedup_entry(Some("m1"), Some("r1"), None, 200, 0.0, false),
+            dedup_entry(Some("m1"), Some("r1"), None, 100, 9.9, false),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].input_tokens, 200);
+    }
+
+    #[test]
+    fn replacement_updates_window_totals() {
+        // A stale partial streamed write arrives first; the complete twin
+        // must replace it and the window aggregates must follow, in both
+        // arrival orders.
+        let now = fixed_now();
+        for flip in [false, true] {
+            let mut partial = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.001, false);
+            partial.timestamp = now;
+            let mut complete = dedup_entry(Some("m1"), Some("r1"), None, 200, 0.002, false);
+            complete.timestamp = now;
+
+            let mut app = AppState::new(WindowSize::W5m, None);
+            let batch = if flip {
+                vec![complete, partial]
+            } else {
+                vec![partial, complete]
+            };
+            app.ingest(batch);
+
+            assert_eq!(app.entries.len(), 1);
+            let (input_rate, _, cost_rate) = app.total_rate(now);
+            let minutes = WindowSize::W5m.as_minutes();
+            assert!((input_rate - 200.0 / minutes).abs() < 1e-9, "flip={flip}");
+            assert!((cost_rate - 0.002 / minutes).abs() < 1e-12, "flip={flip}");
+        }
+    }
+
+    #[test]
+    fn prune_rebuilds_index_consistently() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+
+        let mut old = dedup_entry(Some("m-old"), Some("r1"), None, 100, 0.0, false);
+        old.timestamp = now - time::Duration::hours(25);
+        let mut fresh = dedup_entry(Some("m-new"), Some("r1"), None, 100, 0.0, false);
+        fresh.timestamp = now;
+        app.ingest(vec![old, fresh]);
+        assert_eq!(app.entries.len(), 2);
+
+        // Sweep removes the stale entry and rebuilds the index.
+        app.prune(now);
+        assert_eq!(app.entries.len(), 1);
+
+        // The surviving entry's index must still collapse its twin.
+        let mut fresh_twin = dedup_entry(Some("m-new"), Some("r1"), None, 100, 0.0, false);
+        fresh_twin.timestamp = now;
+        app.ingest(vec![fresh_twin]);
+        assert_eq!(app.entries.len(), 1);
+
+        // A twin of the PRUNED entry counts as new again — retention has
+        // dropped the original, so this is the documented re-count edge.
+        let mut old_twin = dedup_entry(Some("m-old"), Some("r1"), None, 100, 0.0, false);
+        old_twin.timestamp = now;
+        app.ingest(vec![old_twin]);
+        assert_eq!(app.entries.len(), 2);
     }
 
     // --- Prune test ---

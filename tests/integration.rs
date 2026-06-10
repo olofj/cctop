@@ -81,6 +81,7 @@ struct UsageLine {
     output: u64,
     cache_write: u64,
     cache_read: u64,
+    sidechain: bool,
 }
 
 impl UsageLine {
@@ -94,6 +95,7 @@ impl UsageLine {
             output: 0,
             cache_write: 0,
             cache_read: 0,
+            sidechain: false,
         }
     }
 
@@ -109,10 +111,14 @@ impl UsageLine {
         self
     }
 
-    #[allow(dead_code)]
     fn cache(mut self, write: u64, read: u64) -> Self {
         self.cache_write = write;
         self.cache_read = read;
+        self
+    }
+
+    fn sidechain(mut self) -> Self {
+        self.sidechain = true;
         self
     }
 
@@ -137,18 +143,39 @@ impl UsageLine {
         )
     }
 
-    /// Render as a plain assistant transcript line.
-    fn build(&self) -> String {
-        let req = self
-            .request_id
+    fn request_json(&self) -> String {
+        self.request_id
             .as_ref()
             .map(|r| format!(r#","requestId":"{r}""#))
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// Render as a plain assistant transcript line.
+    fn build(&self) -> String {
+        let side = if self.sidechain {
+            r#","isSidechain":true"#
+        } else {
+            ""
+        };
         format!(
-            r#"{{"type":"assistant","timestamp":"{}","message":{}{}}}"#,
+            r#"{{"type":"assistant","timestamp":"{}","message":{}{}{}}}"#,
             rfc3339(self.timestamp),
             self.message_json(),
-            req
+            self.request_json(),
+            side
+        )
+    }
+
+    /// Render as a type:"progress" wrapper line, the shape subagent
+    /// transcripts use for replayed assistant messages: outer line flagged
+    /// isSidechain, usage nested under data.message.message, and the
+    /// envelope carrying requestId/timestamp but no isSidechain.
+    fn build_progress(&self) -> String {
+        format!(
+            r#"{{"type":"progress","timestamp":"{ts}","isSidechain":true,"data":{{"message":{{"timestamp":"{ts}"{req},"message":{msg}}}}}}}"#,
+            ts = rfc3339(self.timestamp),
+            req = self.request_json(),
+            msg = self.message_json(),
         )
     }
 }
@@ -227,6 +254,143 @@ fn cache_breakdown_drives_tokens_and_cost() {
         "cost {} != {expected}",
         e.cost
     );
+}
+
+/// Ingest scan results into a 24h-window app and return the raw (unsmoothed,
+/// single-bucket) histogram totals for assertions.
+fn ingest_and_total(
+    entries: Vec<TokenEntry>,
+    now: OffsetDateTime,
+) -> (AppState, cctop::types::HistBucket) {
+    let mut app = AppState::new(WindowSize::W24h, None);
+    app.ingest(entries);
+    let bucket = app.histogram(now, 1).remove(0);
+    (app, bucket)
+}
+
+#[test]
+fn sidechain_replay_across_files_counted_once() {
+    // Parent message in the session file; the subagent transcript replays it
+    // with a new request id, flagged sidechain, dragging the parent's cache
+    // reads along. The replay must merge away (parent file scans first).
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let session = "11111111-2222-3333-4444-555555555555";
+
+    append_line(
+        &fx.session_file("-test-proj", session),
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r1"))
+            .tokens(100, 50)
+            .build(),
+    );
+    append_line(
+        &fx.subagent_file("-test-proj", session, "agent-abc"),
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r2"))
+            .tokens(100, 50)
+            .cache(0, 50_000)
+            .sidechain()
+            .build(),
+    );
+
+    let (_, total) = ingest_and_total(fx.scan(), now);
+    assert_eq!(total.input_tokens, 100);
+    assert_eq!(total.output_tokens, 50);
+    assert_eq!(
+        total.cache_tokens, 0,
+        "replayed cache reads must merge away"
+    );
+}
+
+#[test]
+fn sidechain_replay_counted_once_when_replay_scans_first() {
+    // Same merge, opposite arrival order: the sidechain copy lives in a
+    // session file that sorts before the parent's.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+
+    append_line(
+        &fx.session_file("-test-proj", "aaaa1111-0000-0000-0000-000000000000"),
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r2"))
+            .tokens(100, 50)
+            .cache(0, 50_000)
+            .sidechain()
+            .build(),
+    );
+    append_line(
+        &fx.session_file("-test-proj", "bbbb2222-0000-0000-0000-000000000000"),
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r1"))
+            .tokens(100, 50)
+            .build(),
+    );
+
+    let (_, total) = ingest_and_total(fx.scan(), now);
+    assert_eq!(total.input_tokens, 100);
+    assert_eq!(total.output_tokens, 50);
+    assert_eq!(total.cache_tokens, 0, "replacement must evict the replay");
+}
+
+#[test]
+fn progress_twin_complete_copy_wins() {
+    // The top-level line is a stale partial streamed write; the nested copy
+    // inside a type:"progress" wrapper is the only complete record. The
+    // complete copy must win in both arrival orders.
+    for flip in [false, true] {
+        let fx = Fixture::new();
+        let now = OffsetDateTime::now_utc();
+        let file = fx.session_file("-test-proj", "11111111-2222-3333-4444-555555555555");
+
+        let partial = UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r1"))
+            .tokens(2, 10)
+            .build();
+        let complete = UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r1"))
+            .tokens(2, 422)
+            .build_progress();
+
+        let (first, second) = if flip {
+            (&complete, &partial)
+        } else {
+            (&partial, &complete)
+        };
+        append_line(&file, first);
+        append_line(&file, second);
+
+        let (_, total) = ingest_and_total(fx.scan(), now);
+        assert_eq!(total.output_tokens, 422, "flip={flip}");
+        assert_eq!(total.input_tokens, 2, "flip={flip}");
+    }
+}
+
+#[test]
+fn requestid_less_duplicates_collapse_keeping_larger() {
+    // Third-party backends omit requestId; repeated writes of the same
+    // message must collapse to the most complete one.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let file = fx.session_file("-test-proj", "11111111-2222-3333-4444-555555555555");
+
+    append_line(
+        &file,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), None)
+            .tokens(100, 0)
+            .build(),
+    );
+    append_line(
+        &file,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), None)
+            .tokens(200, 0)
+            .build(),
+    );
+
+    let (_, total) = ingest_and_total(fx.scan(), now);
+    assert_eq!(total.input_tokens, 200);
 }
 
 #[test]
