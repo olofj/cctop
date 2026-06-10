@@ -816,7 +816,7 @@ impl AppState {
             last_activity: sess.last_activity,
             is_expanded: sess_expanded,
             depth,
-            tree_key: sess_key,
+            tree_key: sess_key.clone(),
         });
 
         if sess_expanded {
@@ -837,7 +837,10 @@ impl AppState {
                     last_activity: agent.last_activity,
                     is_expanded: false,
                     depth: depth + 1,
-                    tree_key: String::new(),
+                    // A real key: selection is restored by tree_key after
+                    // every rebuild, and a shared empty key teleported the
+                    // cursor to the first subagent row in the table.
+                    tree_key: format!("{}/{}", sess_key, agent.agent_id),
                 });
             }
         }
@@ -1950,6 +1953,59 @@ mod tests {
         let sel = app.selected_filter().unwrap();
         assert_eq!(sel.project, "/proj-two");
         assert_eq!(sel.session_id.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn subagent_selection_survives_rebuild() {
+        // Subagent rows used to share an empty tree_key, so the post-rebuild
+        // selection restore matched the first subagent anywhere in the table.
+        let now = fixed_now();
+        let ts = now - time::Duration::seconds(10);
+        let mut app = AppState::new(WindowSize::W5m, None);
+        let mut a = make_entry("/proj", "s1", ts, 100);
+        a.subagent_id = Some("agent-aaa".to_string());
+        let mut b = make_entry("/proj", "s1", ts, 200);
+        b.subagent_id = Some("agent-bbb".to_string());
+        app.ingest(vec![a, b]);
+
+        // Expand project, then its session, to reveal the subagent rows.
+        app.rows(now);
+        app.selected = 0;
+        app.toggle_expand();
+        let sess_idx = app
+            .rows(now)
+            .iter()
+            .position(|r| r.kind == RowKind::Session)
+            .expect("session row");
+        app.selected = sess_idx;
+        app.toggle_expand();
+
+        let bbb_idx = app
+            .rows(now)
+            .iter()
+            .position(|r| r.kind == RowKind::Subagent && r.label.starts_with("agent-bbb"))
+            .expect("agent-bbb row");
+        app.selected = bbb_idx;
+
+        // Every subagent row must carry a distinct, non-empty key.
+        let keys: Vec<String> = app
+            .rows(now)
+            .iter()
+            .filter(|r| r.kind == RowKind::Subagent)
+            .map(|r| r.tree_key.clone())
+            .collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|k| !k.is_empty()));
+        assert_ne!(keys[0], keys[1]);
+
+        // Selection must stay on agent-bbb across a rebuild.
+        app.invalidate();
+        app.rows(now);
+        let label = app.cached_rows()[app.selected].label.clone();
+        assert!(
+            label.starts_with("agent-bbb"),
+            "selection moved to {label:?}"
+        );
     }
 
     // --- Prune test ---
