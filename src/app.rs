@@ -221,45 +221,38 @@ impl AppState {
         seen.len()
     }
 
-    /// Build histogram data for the current window: buckets of token usage over time.
+    /// Build histogram data for the current window: buckets of token usage
+    /// over time, optionally filtered to a selection.
     ///
-    /// Bucket boundaries are aligned to wall-clock multiples of `bucket_secs` so
-    /// the chart slides smoothly one column at a time instead of jittering every frame.
-    pub fn histogram(&self, now: OffsetDateTime, num_buckets: usize) -> Vec<HistBucket> {
+    /// Bucket boundaries are wall-clock-quantized (see BucketGrid) and the
+    /// result is smoothed with a [0.25, 0.5, 0.25] kernel to reduce
+    /// spikiness from large single responses landing in one narrow bucket.
+    pub fn histogram(
+        &self,
+        now: OffsetDateTime,
+        num_buckets: usize,
+        sel: Option<&Selection>,
+    ) -> Vec<HistBucket> {
         if num_buckets == 0 {
             return Vec::new();
         }
-        let window_secs = self.window.as_secs() as f64;
-        let bucket_secs = window_secs / num_buckets as f64;
-
-        // Quantize: snap the right edge to the next bucket boundary so that
-        // the grid only shifts once per bucket_secs.
-        let now_epoch =
-            now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
-        let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
-        let left_edge = right_edge - window_secs;
-
+        let grid = BucketGrid::new(self.window.as_secs() as f64, num_buckets, now);
         let mut buckets = vec![HistBucket::default(); num_buckets];
 
         for e in &self.entries {
-            let t = e.timestamp.unix_timestamp() as f64
-                + (e.timestamp.nanosecond() / 1_000_000) as f64 / 1000.0;
-            if t < left_edge || t >= right_edge {
+            if sel.is_some_and(|s| !s.matches(e)) {
                 continue;
             }
-            // Bucket 0 = oldest, bucket N-1 = most recent
-            let idx = ((t - left_edge) / bucket_secs) as usize;
-            let idx = idx.min(num_buckets - 1);
+            let Some(idx) = grid.index_of(e.timestamp) else {
+                continue;
+            };
             buckets[idx].input_tokens += e.input_tokens;
             buckets[idx].output_tokens += e.output_tokens;
             buckets[idx].cache_tokens += e.cache_write_tokens + e.cache_read_tokens;
             buckets[idx].cost += e.cost;
         }
 
-        // Triangular smoothing [0.25, 0.5, 0.25] to reduce spikiness from
-        // large single responses landing in one narrow bucket.
         smooth_buckets(&mut buckets);
-
         buckets
     }
 
@@ -353,67 +346,6 @@ impl AppState {
         self.find_ancestor(from, RowKind::Session)
     }
 
-    /// Compute a filtered histogram showing only the selected entity's contribution.
-    /// Uses the same quantized bucketing and smoothing as `histogram()`.
-    pub fn histogram_filtered(
-        &self,
-        now: OffsetDateTime,
-        num_buckets: usize,
-        sel: &Selection,
-    ) -> Vec<HistBucket> {
-        if num_buckets == 0 {
-            return Vec::new();
-        }
-        let window_secs = self.window.as_secs() as f64;
-        let bucket_secs = window_secs / num_buckets as f64;
-
-        let now_epoch =
-            now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
-        let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
-        let left_edge = right_edge - window_secs;
-
-        let mut buckets = vec![HistBucket::default(); num_buckets];
-
-        for e in &self.entries {
-            if !sel.project.is_empty() && e.project != sel.project {
-                continue;
-            }
-            if let Some(ref model) = sel.model
-                && e.model != *model
-            {
-                continue;
-            }
-            if let Some(ref sid) = sel.session_id {
-                // Session IDs in entries are full UUIDs; display rows use short_id (12 chars).
-                // Match if the entry's session_id starts with the short ID.
-                if !e.session_id.starts_with(sid.as_str()) {
-                    continue;
-                }
-            }
-            if let Some(ref aid) = sel.subagent_id {
-                match &e.subagent_id {
-                    Some(entry_aid) if entry_aid.starts_with(aid.as_str()) => {}
-                    _ => continue,
-                }
-            }
-
-            let t = e.timestamp.unix_timestamp() as f64
-                + (e.timestamp.nanosecond() / 1_000_000) as f64 / 1000.0;
-            if t < left_edge || t >= right_edge {
-                continue;
-            }
-            let idx = ((t - left_edge) / bucket_secs) as usize;
-            let idx = idx.min(num_buckets - 1);
-            buckets[idx].input_tokens += e.input_tokens;
-            buckets[idx].output_tokens += e.output_tokens;
-            buckets[idx].cache_tokens += e.cache_write_tokens + e.cache_read_tokens;
-            buckets[idx].cost += e.cost;
-        }
-
-        smooth_buckets(&mut buckets);
-        buckets
-    }
-
     /// Hide the project of the currently selected row.
     pub fn hide_selected(&mut self) {
         if let Some(sel) = self.selected_filter() {
@@ -474,30 +406,18 @@ impl AppState {
             .map(|r| r.tree_key.clone());
 
         let minutes = self.window.as_minutes();
-        let n = SPARKLINE_BUCKETS;
 
-        // Quantized bucket edges (same logic as histogram())
-        let window_secs = self.window.as_secs() as f64;
-        let bucket_secs = window_secs / n as f64;
-        let now_epoch =
-            now.unix_timestamp() as f64 + (now.nanosecond() / 1_000_000) as f64 / 1000.0;
-        let right_edge = (now_epoch / bucket_secs).ceil() * bucket_secs;
-        let left_edge = right_edge - window_secs;
+        // Same quantized grid as histogram(), at sparkline resolution.
+        let grid = BucketGrid::new(self.window.as_secs() as f64, SPARKLINE_BUCKETS, now);
 
         let mut project_data: BTreeMap<String, ProjectAgg> = BTreeMap::new();
 
         for entry in &self.entries {
-            let t = entry.timestamp.unix_timestamp() as f64
-                + (entry.timestamp.nanosecond() / 1_000_000) as f64 / 1000.0;
-            let in_window = t >= left_edge && t < right_edge;
-
             let proj = project_data
                 .entry(entry.project.clone())
                 .or_insert_with(|| ProjectAgg::new(entry.project.clone()));
 
-            if in_window {
-                let idx = ((t - left_edge) / bucket_secs) as usize;
-                let idx = idx.min(n - 1);
+            if let Some(idx) = grid.index_of(entry.timestamp) {
                 let total = entry.input_tokens
                     + entry.output_tokens
                     + entry.cache_write_tokens
@@ -1045,6 +965,45 @@ fn rebuild_index(entries: &[TokenEntry], index: &mut FxHashMap<u64, Vec<usize>>)
     }
 }
 
+/// Wall-clock-quantized bucket grid over a window ending (roughly) now.
+/// The right edge snaps up to the next multiple of bucket_secs, so the grid
+/// shifts one column at a time instead of jittering every frame. Used by the
+/// histogram and the per-row sparklines so the two can never disagree.
+struct BucketGrid {
+    left_edge: f64,
+    right_edge: f64,
+    bucket_secs: f64,
+    num_buckets: usize,
+}
+
+impl BucketGrid {
+    fn new(window_secs: f64, num_buckets: usize, now: OffsetDateTime) -> Self {
+        let bucket_secs = window_secs / num_buckets as f64;
+        let right_edge = (epoch_secs(now) / bucket_secs).ceil() * bucket_secs;
+        Self {
+            left_edge: right_edge - window_secs,
+            right_edge,
+            bucket_secs,
+            num_buckets,
+        }
+    }
+
+    /// Bucket index for a timestamp (0 = oldest), or None outside the window.
+    fn index_of(&self, ts: OffsetDateTime) -> Option<usize> {
+        let t = epoch_secs(ts);
+        if t < self.left_edge || t >= self.right_edge {
+            return None;
+        }
+        let idx = ((t - self.left_edge) / self.bucket_secs) as usize;
+        Some(idx.min(self.num_buckets - 1))
+    }
+}
+
+/// Epoch seconds with millisecond precision.
+fn epoch_secs(ts: OffsetDateTime) -> f64 {
+    ts.unix_timestamp() as f64 + (ts.nanosecond() / 1_000_000) as f64 / 1000.0
+}
+
 /// Compare two f64 values without panicking on NaN.
 fn f64_cmp(a: f64, b: f64) -> std::cmp::Ordering {
     a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
@@ -1371,7 +1330,7 @@ mod tests {
     #[test]
     fn histogram_empty_entries() {
         let app = AppState::new(WindowSize::W5m, None);
-        let buckets = app.histogram(fixed_now(), 10);
+        let buckets = app.histogram(fixed_now(), 10, None);
         assert_eq!(buckets.len(), 10);
         assert!(buckets.iter().all(|b| b.input_tokens == 0));
     }
@@ -1387,7 +1346,7 @@ mod tests {
             now - time::Duration::seconds(1),
             1000,
         )]);
-        let buckets = app.histogram(now, 10);
+        let buckets = app.histogram(now, 10, None);
         // After smoothing, the last bucket should have the most tokens
         let max_idx = buckets
             .iter()
@@ -1418,7 +1377,7 @@ mod tests {
             now - time::Duration::seconds(299),
             500,
         )]);
-        let buckets = app.histogram(now, 10);
+        let buckets = app.histogram(now, 10, None);
         // Peak should be near the start
         let max_idx = buckets
             .iter()
@@ -1443,7 +1402,7 @@ mod tests {
             now - time::Duration::seconds(120),
             1000,
         )]);
-        let buckets = app.histogram(now, 8);
+        let buckets = app.histogram(now, 8, None);
         assert!(buckets.iter().all(|b| b.input_tokens == 0));
     }
 
@@ -1464,8 +1423,8 @@ mod tests {
         let mut app2 = AppState::new(WindowSize::W5m, None);
         app2.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
-        let h1 = app1.histogram(now1, 8);
-        let h2 = app2.histogram(now2, 8);
+        let h1 = app1.histogram(now1, 8, None);
+        let h2 = app2.histogram(now2, 8, None);
 
         // Both should have exactly 1000 total tokens
         let sum1: u64 = h1.iter().map(|b| b.input_tokens).sum();
@@ -1492,7 +1451,7 @@ mod tests {
         let mut app = AppState::new(WindowSize::W8h, None);
         app.ingest(vec![make_entry("/test", "s1", entry_ts, 1000)]);
 
-        let h1 = app.histogram(now, num_buckets);
+        let h1 = app.histogram(now, num_buckets, None);
         let peak1 = h1
             .iter()
             .enumerate()
@@ -1502,7 +1461,7 @@ mod tests {
 
         // Advance time by exactly one bucket
         let later = now + time::Duration::seconds(bucket_secs as i64);
-        let h2 = app.histogram(later, num_buckets);
+        let h2 = app.histogram(later, num_buckets, None);
         let peak2 = h2
             .iter()
             .enumerate()

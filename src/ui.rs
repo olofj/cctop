@@ -316,7 +316,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
         return;
     }
 
-    let buckets = app.histogram(now, chart_width);
+    let buckets = app.histogram(now, chart_width, None);
     if buckets.is_empty() {
         return;
     }
@@ -363,7 +363,7 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
     // In Selected mode, compute a second histogram filtered to the selection
     let sel_buckets = selection
         .as_ref()
-        .map(|sel| app.histogram_filtered(now, chart_width, sel));
+        .map(|sel| app.histogram(now, chart_width, Some(sel)));
 
     let sub_positions = (chart_height * 8) as f64;
     let chart_x = inner.x + y_label_width;

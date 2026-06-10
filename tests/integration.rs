@@ -264,7 +264,7 @@ fn ingest_and_total(
 ) -> (AppState, cctop::types::HistBucket) {
     let mut app = AppState::new(WindowSize::W24h, None);
     app.ingest(entries);
-    let bucket = app.histogram(now, 1).remove(0);
+    let bucket = app.histogram(now, 1, None).remove(0);
     (app, bucket)
 }
 

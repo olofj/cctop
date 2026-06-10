@@ -351,6 +351,34 @@ pub struct Selection {
     pub subagent_id: Option<String>,
 }
 
+impl Selection {
+    /// Does an entry fall under this selection? Session and subagent labels
+    /// in display rows are short_id-truncated (12 chars), so those fields
+    /// match by prefix against the entry's full ids.
+    pub fn matches(&self, e: &TokenEntry) -> bool {
+        if !self.project.is_empty() && e.project != self.project {
+            return false;
+        }
+        if let Some(ref model) = self.model
+            && e.model != *model
+        {
+            return false;
+        }
+        if let Some(ref sid) = self.session_id
+            && !e.session_id.starts_with(sid.as_str())
+        {
+            return false;
+        }
+        if let Some(ref aid) = self.subagent_id {
+            match &e.subagent_id {
+                Some(entry_aid) if entry_aid.starts_with(aid.as_str()) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
 /// One time-bucket for the histogram.
 #[derive(Debug, Clone, Default)]
 pub struct HistBucket {
