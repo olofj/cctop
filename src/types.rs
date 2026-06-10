@@ -170,84 +170,61 @@ pub enum WindowSize {
 pub const MAX_RETENTION_SECS: i64 = 24 * 3600;
 
 impl WindowSize {
+    /// (window, seconds, label) in declaration order — `self as usize`
+    /// indexes into this, and next/prev step through it.
+    const ALL: [(WindowSize, u64, &'static str); 9] = [
+        (Self::W1m, 60, "1m"),
+        (Self::W5m, 300, "5m"),
+        (Self::W15m, 900, "15m"),
+        (Self::W30m, 1800, "30m"),
+        (Self::W1h, 3600, "1h"),
+        (Self::W2h, 7200, "2h"),
+        (Self::W4h, 14400, "4h"),
+        (Self::W8h, 28800, "8h"),
+        (Self::W24h, 86400, "24h"),
+    ];
+
+    pub fn as_secs(self) -> u64 {
+        Self::ALL[self as usize].1
+    }
+
     pub fn as_duration(self) -> Duration {
-        match self {
-            Self::W1m => Duration::from_secs(60),
-            Self::W5m => Duration::from_secs(300),
-            Self::W15m => Duration::from_secs(900),
-            Self::W30m => Duration::from_secs(1800),
-            Self::W1h => Duration::from_secs(3600),
-            Self::W2h => Duration::from_secs(7200),
-            Self::W4h => Duration::from_secs(14400),
-            Self::W8h => Duration::from_secs(28800),
-            Self::W24h => Duration::from_secs(86400),
-        }
+        Duration::from_secs(self.as_secs())
     }
 
     pub fn as_minutes(self) -> f64 {
-        self.as_duration().as_secs_f64() / 60.0
-    }
-
-    pub fn as_secs(self) -> u64 {
-        self.as_duration().as_secs()
+        self.as_secs() as f64 / 60.0
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Self::W1m => "1m",
-            Self::W5m => "5m",
-            Self::W15m => "15m",
-            Self::W30m => "30m",
-            Self::W1h => "1h",
-            Self::W2h => "2h",
-            Self::W4h => "4h",
-            Self::W8h => "8h",
-            Self::W24h => "24h",
-        }
+        Self::ALL[self as usize].2
     }
 
+    /// One step larger (saturating at 24h).
     pub fn next(self) -> Self {
-        match self {
-            Self::W1m => Self::W5m,
-            Self::W5m => Self::W15m,
-            Self::W15m => Self::W30m,
-            Self::W30m => Self::W1h,
-            Self::W1h => Self::W2h,
-            Self::W2h => Self::W4h,
-            Self::W4h => Self::W8h,
-            Self::W8h => Self::W24h,
-            Self::W24h => Self::W24h,
-        }
+        Self::ALL[(self as usize + 1).min(Self::ALL.len() - 1)].0
     }
 
+    /// One step smaller (saturating at 1m).
     pub fn prev(self) -> Self {
-        match self {
-            Self::W1m => Self::W1m,
-            Self::W5m => Self::W1m,
-            Self::W15m => Self::W5m,
-            Self::W30m => Self::W15m,
-            Self::W1h => Self::W30m,
-            Self::W2h => Self::W1h,
-            Self::W4h => Self::W2h,
-            Self::W8h => Self::W4h,
-            Self::W24h => Self::W8h,
-        }
+        Self::ALL[(self as usize).saturating_sub(1)].0
     }
 
     /// Parse a window argument. Accepts the canonical labels plus a few
     /// loose aliases; anything else is an error (a silent default would
     /// make a typo look like a 5m measurement).
     pub fn parse(s: &str) -> Option<Self> {
+        if let Some(&(w, ..)) = Self::ALL.iter().find(|(_, _, label)| *label == s) {
+            return Some(w);
+        }
         match s {
-            "1m" | "1" => Some(Self::W1m),
-            "5m" | "5" => Some(Self::W5m),
-            "15m" | "15" => Some(Self::W15m),
-            "30m" | "30" => Some(Self::W30m),
-            "1h" | "60m" | "60" => Some(Self::W1h),
-            "2h" | "120m" => Some(Self::W2h),
-            "4h" | "240m" => Some(Self::W4h),
-            "8h" => Some(Self::W8h),
-            "24h" => Some(Self::W24h),
+            "1" => Some(Self::W1m),
+            "5" => Some(Self::W5m),
+            "15" => Some(Self::W15m),
+            "30" => Some(Self::W30m),
+            "60m" | "60" => Some(Self::W1h),
+            "120m" => Some(Self::W2h),
+            "240m" => Some(Self::W4h),
             _ => None,
         }
     }
@@ -439,6 +416,23 @@ impl GraphMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_table_order_matches_enum_discriminants() {
+        // `self as usize` indexes into ALL, so table order and declaration
+        // order must agree.
+        for (i, (w, ..)) in WindowSize::ALL.iter().enumerate() {
+            assert_eq!(*w as usize, i, "ALL[{i}] = {w:?} out of order");
+        }
+    }
+
+    #[test]
+    fn window_next_prev_walk_the_table() {
+        assert_eq!(WindowSize::W1m.prev(), WindowSize::W1m);
+        assert_eq!(WindowSize::W1m.next(), WindowSize::W5m);
+        assert_eq!(WindowSize::W24h.next(), WindowSize::W24h);
+        assert_eq!(WindowSize::W24h.prev(), WindowSize::W8h);
+    }
 
     #[test]
     fn window_parse_accepts_labels_and_aliases() {

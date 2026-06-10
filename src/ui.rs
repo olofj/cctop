@@ -448,7 +448,13 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
     if x_axis_y < inner.y + inner.height {
         let time_labels = [
             (0usize, format!("-{}", app.window.label())),
-            (chart_width / 2, format!("-{}", half_label(app.window))),
+            (
+                chart_width / 2,
+                format!(
+                    "-{}",
+                    format_duration_short(app.window.as_secs() as f64 / 2.0)
+                ),
+            ),
             (chart_width.saturating_sub(3), "now".to_string()),
         ];
 
@@ -494,7 +500,12 @@ fn format_duration_short(secs: f64) -> String {
             format!("{:.1}m", m)
         }
     } else {
-        format!("{:.1}h", secs / 3600.0)
+        let h = secs / 3600.0;
+        if h.fract() < 0.05 {
+            format!("{:.0}h", h)
+        } else {
+            format!("{:.1}h", h)
+        }
     }
 }
 
@@ -516,22 +527,6 @@ fn bar_color(input: u64, output: u64, cache: u64) -> Color {
         COL_OUTPUT
     } else {
         COL_CACHE
-    }
-}
-
-/// Return the label for half the window duration.
-fn half_label(window: crate::types::WindowSize) -> &'static str {
-    use crate::types::WindowSize::*;
-    match window {
-        W1m => "30s",
-        W5m => "2.5m",
-        W15m => "7.5m",
-        W30m => "15m",
-        W1h => "30m",
-        W2h => "1h",
-        W4h => "2h",
-        W8h => "4h",
-        W24h => "12h",
     }
 }
 
