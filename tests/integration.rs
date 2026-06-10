@@ -396,6 +396,78 @@ fn requestid_less_duplicates_collapse_keeping_larger() {
 }
 
 #[test]
+fn hostile_jsonl_lines_skipped_quietly() {
+    // Real transcripts contain plenty of non-usage and garbage-adjacent
+    // lines — including tool results that embed the literal string
+    // "input_tokens" (e.g. this project's own source pasted into a session).
+    // The scan must keep exactly the parseable usage lines and skip the
+    // rest without panicking.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let file = fx.session_file("-test-proj", "11111111-2222-3333-4444-555555555555");
+
+    // 1: empty line
+    append_line(&file, "");
+    // 2: not JSON at all (with the magic substring)
+    append_line(&file, r#"not json but mentions "input_tokens" anyway"#);
+    // 3: JSON truncated mid-object, containing the pre-filter substring
+    append_line(
+        &file,
+        r#"{"type":"assistant","message":{"usage":{"input_tokens":123"#,
+    );
+    // 4: a user tool-result line whose content embeds usage-like JSON
+    append_line(
+        &file,
+        &format!(
+            r#"{{"type":"user","timestamp":"{}","message":{{"role":"user","content":[{{"type":"tool_result","content":"{{\"input_tokens\":42,\"output_tokens\":7}}"}}]}}}}"#,
+            rfc3339(now)
+        ),
+    );
+    // 5: assistant line with an unparseable timestamp
+    append_line(
+        &file,
+        r#"{"type":"assistant","timestamp":"yesterday","requestId":"r9","message":{"usage":{"input_tokens":50,"output_tokens":5},"model":"claude-haiku-4-5","id":"m9"}}"#,
+    );
+    // 6: assistant line with no model — counted, model "unknown", cost $0
+    append_line(
+        &file,
+        &format!(
+            r#"{{"type":"assistant","timestamp":"{}","requestId":"r6","message":{{"usage":{{"input_tokens":11,"output_tokens":2}},"id":"m6"}}}}"#,
+            rfc3339(now)
+        ),
+    );
+    // 7: non-UTC offset timestamp — must parse and count
+    append_line(
+        &file,
+        r#"{"type":"assistant","timestamp":"2099-01-01T10:00:00+05:30","requestId":"r7","message":{"usage":{"input_tokens":13,"output_tokens":3},"model":"claude-haiku-4-5","id":"m7"}}"#,
+    );
+    // 8: a fully valid line
+    append_line(
+        &file,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m8"), Some("r8"))
+            .tokens(100, 50)
+            .build(),
+    );
+
+    let mut entries = fx.scan();
+    entries.sort_by(|a, b| a.message_id.cmp(&b.message_id));
+    let ids: Vec<_> = entries
+        .iter()
+        .map(|e| e.message_id.as_deref().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["m6", "m7", "m8"], "exactly the parseable usage lines");
+
+    let m6 = &entries[0];
+    assert_eq!(m6.model, "unknown");
+    assert_eq!(m6.cost, 0.0);
+
+    let m8 = &entries[2];
+    assert_eq!(m8.input_tokens, 100);
+    assert!(m8.cost > 0.0);
+}
+
+#[test]
 fn live_append_and_new_file_detected() {
     use cctop::types::WatchEvent;
     use std::time::{Duration, Instant};
