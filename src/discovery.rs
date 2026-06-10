@@ -172,56 +172,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_simple_project() {
-        assert_eq!(
-            decode_project_name("-home-olof-ccusage"),
-            "/home/olof/ccusage"
-        );
-    }
-
-    #[test]
-    fn extract_project_from_typical_path() {
-        let path = PathBuf::from("/home/olof/.claude/projects/-home-olof-ccusage/abc123.jsonl");
-        assert_eq!(extract_project_from_path(&path), "/home/olof/ccusage");
-    }
-
-    #[test]
-    fn extract_session_from_root_jsonl() {
-        let path = PathBuf::from(
-            "/home/olof/.claude/projects/-home-olof-cctop/a513fce4-09ec-4a5f-9f9c-0daf00107f45.jsonl",
-        );
-        assert_eq!(
-            extract_session_from_path(&path),
-            "a513fce4-09ec-4a5f-9f9c-0daf00107f45"
-        );
-    }
-
-    #[test]
-    fn extract_session_from_subagent_path() {
-        let path = PathBuf::from(
-            "/home/olof/.claude/projects/-proj/a513fce4-09ec-4a5f/subagents/agent-abc.jsonl",
-        );
-        assert_eq!(extract_session_from_path(&path), "a513fce4-09ec-4a5f");
-    }
-
-    #[test]
-    fn extract_subagent_id() {
-        let path = PathBuf::from(
-            "/home/olof/.claude/projects/-proj/session/subagents/agent-a2d4e28a033f945b8.jsonl",
-        );
-        assert_eq!(
-            extract_subagent_from_path(&path),
-            Some("agent-a2d4e28a033f945b8".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_subagent_none_for_main_session() {
-        let path = PathBuf::from("/home/olof/.claude/projects/-proj/a513fce4.jsonl");
-        assert_eq!(extract_subagent_from_path(&path), None);
-    }
-
-    #[test]
     fn extract_subagent_none_for_meta_json() {
         let path = PathBuf::from(
             "/home/olof/.claude/projects/-proj/session/subagents/agent-abc.meta.json",

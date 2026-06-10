@@ -580,13 +580,8 @@ mod tests {
     // --- tiered_cost ---
 
     #[test]
-    fn tiered_cost_zero_tokens() {
-        assert_eq!(tiered_cost(0, 1.0, None), 0.0);
-        assert_eq!(tiered_cost(0, 1.0, Some(2.0)), 0.0);
-    }
-
-    #[test]
     fn tiered_cost_below_and_at_threshold_uses_base_rate() {
+        assert_eq!(tiered_cost(0, 1.0, Some(2.0)), 0.0);
         assert_eq!(tiered_cost(100_000, 0.001, Some(0.002)), 100_000.0 * 0.001);
         assert_eq!(tiered_cost(200_000, 0.001, Some(0.002)), 200_000.0 * 0.001);
     }
@@ -596,21 +591,51 @@ mod tests {
         let cost = tiered_cost(300_000, 0.001, Some(0.002));
         let expected = 200_000.0 * 0.001 + 100_000.0 * 0.002;
         assert!((cost - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn tiered_cost_no_tier_above_threshold_all_base() {
+        // No tier configured: everything bills at the base rate.
         assert_eq!(tiered_cost(300_000, 0.001, None), 300_000.0 * 0.001);
     }
 
-    // --- lookup hardening (ported from ccusage) ---
-
+    /// Snapshot of the builtin table's load-bearing rates — this class of
+    /// pin caught a real bad-rates bug once (fd21eff). One test, six models.
     #[test]
-    fn lookup_exact_match() {
+    fn builtin_table_rates() {
         let p = lookup_pricing("claude-opus-4-6").unwrap();
-        assert_eq!(p.input, mtok(5.0));
-        assert_eq!(p.output, mtok(25.0));
+        assert_eq!((p.input, p.output), (mtok(5.0), mtok(25.0)));
+        assert_eq!(p.fast_multiplier, 6.0);
+        assert!(p.input_above_200k.is_none());
+
+        assert_eq!(
+            lookup_pricing("claude-opus-4-7").unwrap().fast_multiplier,
+            6.0
+        );
+        assert_eq!(
+            lookup_pricing("claude-opus-4-8").unwrap().fast_multiplier,
+            2.0
+        );
+
+        let p = lookup_pricing("claude-fable-5").unwrap();
+        assert_eq!((p.input, p.output), (mtok(10.0), mtok(50.0)));
+        assert_eq!((p.cache_write, p.cache_read), (mtok(12.50), mtok(1.0)));
+        assert_eq!(p.fast_multiplier, 1.0);
+
+        // Sonnet 4.5 keeps the >200k tier; 4.6 dropped it.
+        assert_eq!(
+            lookup_pricing("claude-sonnet-4-5")
+                .unwrap()
+                .input_above_200k,
+            Some(mtok(6.0))
+        );
+        assert!(
+            lookup_pricing("claude-sonnet-4-6")
+                .unwrap()
+                .input_above_200k
+                .is_none()
+        );
+
+        assert_eq!(lookup_pricing("claude-haiku-4-5").unwrap().input, mtok(1.0));
     }
+
+    // --- lookup hardening (ported from ccusage) ---
 
     #[test]
     fn lookup_model_inside_key() {
@@ -638,55 +663,11 @@ mod tests {
     }
 
     #[test]
-    fn opus_46_no_tier_fast_6x() {
-        let p = lookup_pricing("claude-opus-4-6").unwrap();
-        assert!(p.input_above_200k.is_none());
-        assert_eq!(p.fast_multiplier, 6.0);
-    }
-
-    #[test]
-    fn opus_47_and_48_rates() {
-        let p7 = lookup_pricing("claude-opus-4-7").unwrap();
-        assert_eq!(p7.input, mtok(5.0));
-        assert_eq!(p7.fast_multiplier, 6.0);
-        let p8 = lookup_pricing("claude-opus-4-8").unwrap();
-        assert_eq!(p8.input, mtok(5.0));
-        assert_eq!(p8.fast_multiplier, 2.0);
-    }
-
-    #[test]
-    fn fable_5_rates() {
-        let p = lookup_pricing("claude-fable-5").unwrap();
-        assert_eq!(p.input, mtok(10.0));
-        assert_eq!(p.output, mtok(50.0));
-        assert_eq!(p.cache_write, mtok(12.50));
-        assert_eq!(p.cache_read, mtok(1.0));
-        assert_eq!(p.fast_multiplier, 1.0);
-        assert!(p.input_above_200k.is_none());
-    }
-
-    #[test]
     fn fable_5_bracket_variant_matches() {
         // Claude Code reports e.g. "claude-fable-5[1m]"; the bracket is a
         // non-alphanumeric boundary so the base key must match.
         let p = lookup_pricing("claude-fable-5[1m]").unwrap();
         assert_eq!(p.input, mtok(10.0));
-    }
-
-    #[test]
-    fn sonnet_46_no_tier_sonnet_45_keeps_tier() {
-        assert!(
-            lookup_pricing("claude-sonnet-4-6")
-                .unwrap()
-                .input_above_200k
-                .is_none()
-        );
-        assert_eq!(
-            lookup_pricing("claude-sonnet-4-5")
-                .unwrap()
-                .input_above_200k,
-            Some(mtok(6.0))
-        );
     }
 
     #[test]

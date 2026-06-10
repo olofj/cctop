@@ -719,18 +719,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_short_string_unchanged() {
+    fn truncate_ascii_behavior() {
         assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_exact_length_unchanged() {
         assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string_adds_ellipsis() {
         assert_eq!(truncate("hello world", 6), "hello…");
+        assert_eq!(truncate("hello", 1), "…");
+        assert_eq!(truncate("", 5), "");
     }
 
     #[test]
@@ -748,15 +742,5 @@ mod tests {
         let result = truncate(label, 4);
         assert_eq!(result, "▸▾▸…");
         assert_eq!(result.chars().count(), 4);
-    }
-
-    #[test]
-    fn truncate_to_one() {
-        assert_eq!(truncate("hello", 1), "…");
-    }
-
-    #[test]
-    fn truncate_empty_string() {
-        assert_eq!(truncate("", 5), "");
     }
 }

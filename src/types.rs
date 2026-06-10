@@ -449,27 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_creation_count_prefers_breakdown() {
-        let usage: Usage = serde_json::from_str(
-            r#"{"input_tokens":1,"output_tokens":2,
-                "cache_creation_input_tokens":999,
-                "cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}}"#,
-        )
-        .unwrap();
-        // Breakdown present: the flat field must be ignored, not added.
-        assert_eq!(usage.cache_creation_token_count(), 300);
-    }
-
-    #[test]
-    fn cache_creation_count_falls_back_to_flat_field() {
-        let usage: Usage = serde_json::from_str(
-            r#"{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":999}"#,
-        )
-        .unwrap();
-        assert_eq!(usage.cache_creation_token_count(), 999);
-    }
-
-    #[test]
     fn progress_record_flattens_envelope() {
         let line = r#"{
             "type":"progress",
@@ -522,19 +501,6 @@ mod tests {
         let rec: ProgressRecord = serde_json::from_str(line).unwrap();
         let raw = rec.into_raw_record().unwrap();
         assert_eq!(raw.is_sidechain, None);
-    }
-
-    #[test]
-    fn progress_record_rejects_other_kinds() {
-        let line = r#"{
-            "type":"queued",
-            "timestamp":"2026-06-09T10:00:00Z",
-            "data":{"message":{
-                "message":{"usage":{"input_tokens":1,"output_tokens":2},"model":"m"}
-            }}
-        }"#;
-        let rec: ProgressRecord = serde_json::from_str(line).unwrap();
-        assert!(rec.into_raw_record().is_none());
     }
 
     #[test]

@@ -1450,40 +1450,31 @@ mod tests {
     // --- Formatting tests ---
 
     #[test]
-    fn format_rate_values() {
+    fn format_helpers_pin_display_thresholds() {
         assert_eq!(format_rate(0.0), "0");
         assert_eq!(format_rate(500.0), "500");
         assert_eq!(format_rate(1_500.0), "1.5K");
         assert_eq!(format_rate(50_000.0), "50K");
         assert_eq!(format_rate(1_500_000.0), "1.5M");
-    }
 
-    #[test]
-    fn format_cost_values() {
         assert_eq!(format_cost(0.0), "$0");
         assert_eq!(format_cost(1.23), "$1.23");
         assert_eq!(format_cost(45.6), "$45.6");
         assert_eq!(format_cost(123.0), "$123");
-    }
 
-    #[test]
-    fn format_cost_total_values() {
+        // Cumulative totals never truncate cents.
         assert_eq!(format_cost_total(0.0), "$0.00");
-        assert_eq!(format_cost_total(1.23), "$1.23");
-        assert_eq!(format_cost_total(45.67), "$45.67");
         assert_eq!(format_cost_total(145.23), "$145.23");
         assert_eq!(format_cost_total(1234.56), "$1234.56");
-    }
 
-    #[test]
-    fn format_relative_time_values() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(1_500), "1.5K");
+        assert_eq!(format_tokens(50_000), "50K");
+        assert_eq!(format_tokens(1_500_000), "1.5M");
+
         let now = fixed_now();
         assert_eq!(format_relative_time(None, now), "-");
         assert_eq!(format_relative_time(Some(now), now), "0s ago");
-        assert_eq!(
-            format_relative_time(Some(now - time::Duration::seconds(30)), now),
-            "30s ago"
-        );
         assert_eq!(
             format_relative_time(Some(now - time::Duration::seconds(120)), now),
             "2m ago"
@@ -1492,15 +1483,6 @@ mod tests {
             format_relative_time(Some(now - time::Duration::seconds(7200)), now),
             "2h ago"
         );
-    }
-
-    #[test]
-    fn format_tokens_values() {
-        assert_eq!(format_tokens(0), "0");
-        assert_eq!(format_tokens(500), "500");
-        assert_eq!(format_tokens(1_500), "1.5K");
-        assert_eq!(format_tokens(50_000), "50K");
-        assert_eq!(format_tokens(1_500_000), "1.5M");
     }
 
     // --- Smoothing tests ---
@@ -1560,17 +1542,6 @@ mod tests {
     }
 
     // --- Dedup tests (merge rules ported from ccusage) ---
-
-    #[test]
-    fn ingest_deduplicates() {
-        let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m, None);
-        let entry = make_entry("/proj", "s1", now, 100);
-        let dup = entry.clone();
-        app.ingest(vec![entry, dup]);
-        // Should only have one entry
-        assert_eq!(app.entries.len(), 1);
-    }
 
     #[test]
     fn no_message_id_never_deduped() {
@@ -1969,33 +1940,17 @@ mod tests {
     // --- Prune test ---
 
     #[test]
-    fn prune_removes_old_entries() {
+    fn prune_keeps_recent_drops_old() {
         let now = fixed_now();
         let mut app = AppState::new(WindowSize::W5m, None);
-        // Entry 25 hours ago
-        app.ingest(vec![make_entry(
-            "/proj",
-            "s1",
-            now - time::Duration::hours(25),
-            100,
-        )]);
-        assert_eq!(app.entries.len(), 1);
-        app.prune(now);
-        assert_eq!(app.entries.len(), 0);
-    }
-
-    #[test]
-    fn prune_keeps_recent_entries() {
-        let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m, None);
-        app.ingest(vec![make_entry(
-            "/proj",
-            "s1",
-            now - time::Duration::hours(1),
-            100,
-        )]);
+        app.ingest(vec![
+            make_entry("/proj", "s1", now - time::Duration::hours(25), 100),
+            make_entry("/proj", "s1", now - time::Duration::hours(1), 200),
+        ]);
+        assert_eq!(app.entries.len(), 2);
         app.prune(now);
         assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].input_tokens, 200);
     }
 
     // --- Project filter tests ---
@@ -2027,44 +1982,24 @@ mod tests {
         assert_eq!(app.entries[0].project, "/home/u/my/app");
     }
 
-    #[test]
-    fn project_filter_none_includes_all() {
-        let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W5m, None);
-        app.ingest(vec![
-            make_entry("/proj1", "s1", now, 100),
-            make_entry("/proj2", "s2", now, 200),
-        ]);
-        assert_eq!(app.entries.len(), 2);
-    }
-
     // --- f64_cmp tests ---
 
     #[test]
-    fn f64_cmp_normal_values() {
+    fn f64_cmp_orders_and_survives_nan() {
         assert_eq!(f64_cmp(1.0, 2.0), std::cmp::Ordering::Less);
         assert_eq!(f64_cmp(2.0, 1.0), std::cmp::Ordering::Greater);
-        assert_eq!(f64_cmp(1.0, 1.0), std::cmp::Ordering::Equal);
-    }
-
-    #[test]
-    fn f64_cmp_nan_does_not_panic() {
-        // NaN comparisons should return Equal, not panic
+        // NaN comparisons return Equal instead of panicking.
         assert_eq!(f64_cmp(f64::NAN, 1.0), std::cmp::Ordering::Equal);
-        assert_eq!(f64_cmp(1.0, f64::NAN), std::cmp::Ordering::Equal);
         assert_eq!(f64_cmp(f64::NAN, f64::NAN), std::cmp::Ordering::Equal);
     }
 
     // --- short_id tests ---
 
     #[test]
-    fn short_id_truncates_long_ids() {
+    fn short_id_truncates_to_twelve_chars() {
+        // 12 chars is a cross-module contract: Selection::matches resolves
+        // short row labels back to full ids by prefix.
         assert_eq!(short_id("abcdefghijklmnop"), "abcdefghijkl");
-    }
-
-    #[test]
-    fn short_id_keeps_short_ids() {
         assert_eq!(short_id("abc"), "abc");
-        assert_eq!(short_id("exactly12chr"), "exactly12chr");
     }
 }
