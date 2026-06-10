@@ -526,6 +526,54 @@ fn live_append_and_new_file_detected() {
 }
 
 #[test]
+fn stale_mtime_file_skipped_then_tracked_live() {
+    use cctop::types::WatchEvent;
+    use std::time::{Duration, Instant};
+
+    // A file whose mtime predates the retention window is skipped at scan
+    // time but registered at EOF — a later append must deliver only the
+    // new line, never replay the old content.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let file = fx.session_file("-test-proj", "11111111-2222-3333-4444-555555555555");
+
+    append_line(
+        &file,
+        &UsageLine::new(now - time::Duration::hours(48), "claude-haiku-4-5")
+            .ids(Some("m-ancient"), Some("r0"))
+            .tokens(1000, 1000)
+            .build(),
+    );
+    let f = fs::OpenOptions::new().write(true).open(&file).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(25 * 3600))
+        .unwrap();
+    drop(f);
+
+    let (initial, rx) = watcher::start(vec![fx.base.clone()], MAX_RETENTION_SECS);
+    assert!(initial.is_empty(), "stale-mtime file must not be read");
+
+    append_line(
+        &file,
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m-fresh"), Some("r1"))
+            .tokens(10, 5)
+            .build(),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen: Vec<String> = Vec::new();
+    while Instant::now() < deadline && seen.is_empty() {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(WatchEvent::NewEntries(entries)) => {
+                seen.extend(entries.iter().filter_map(|e| e.message_id.clone()));
+            }
+            Ok(WatchEvent::Error(_)) | Err(_) => {}
+        }
+    }
+    assert_eq!(seen, ["m-fresh"], "only the appended line may be delivered");
+}
+
+#[test]
 fn subagent_files_attributed_to_parent_session() {
     let fx = Fixture::new();
     let now = OffsetDateTime::now_utc();

@@ -1775,6 +1775,32 @@ mod tests {
         assert_eq!(app.entries.len(), 2);
     }
 
+    #[test]
+    fn window_cutoff_filters_aggregates() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        let mut recent = make_entry("/p", "s1", now - time::Duration::seconds(30), 500);
+        recent.cost = 0.05;
+        let mut older = make_entry("/p", "s2", now - time::Duration::minutes(10), 300);
+        older.cost = 0.03;
+        let mut old = make_entry("/p", "s3", now - time::Duration::hours(23), 100);
+        old.cost = 0.01;
+        app.ingest(vec![recent, older, old]);
+
+        // 5m window: only the 30s-old entry counts.
+        assert_eq!(app.total_window_sessions(now), 1);
+        assert!((app.total_window_cost(now) - 0.05).abs() < 1e-12);
+        let (input_rate, _, _) = app.total_rate(now);
+        assert!((input_rate - 500.0 / 5.0).abs() < 1e-9);
+
+        // 24h window: all three count, rates divide by the right minutes.
+        app.window = WindowSize::W24h;
+        assert_eq!(app.total_window_sessions(now), 3);
+        assert!((app.total_window_cost(now) - 0.09).abs() < 1e-12);
+        let (input_rate, _, _) = app.total_rate(now);
+        assert!((input_rate - 900.0 / 1440.0).abs() < 1e-9);
+    }
+
     // --- Row emission tests ---
 
     #[test]

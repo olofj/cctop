@@ -472,6 +472,24 @@ mod parse_tests {
     }
 
     #[test]
+    fn cost_usd_short_circuits_pricing() {
+        // An embedded costUSD is authoritative: no pricing lookup, no
+        // unknown-model recording, even for a model we can't price.
+        let line = r#"{"timestamp":"2026-06-09T10:00:00Z","requestId":"r1","costUSD":0.42,
+            "message":{"usage":{"input_tokens":100,"output_tokens":50},
+                       "model":"cctop-test-unpriceable-model-xq","id":"m1"}}"#
+            .replace('\n', "");
+        let e = parse_line(&line, &identity()).unwrap();
+        assert_eq!(e.cost, 0.42);
+        assert!(
+            !crate::pricing::unknown_models()
+                .iter()
+                .any(|m| m.contains("unpriceable")),
+            "costUSD entries must not be recorded as unknown models"
+        );
+    }
+
+    #[test]
     fn parses_progress_wrapper_line() {
         let line = r#"{"type":"progress","timestamp":"2026-06-09T10:00:00Z","isSidechain":true,
             "data":{"message":{"timestamp":"2026-06-09T10:00:01Z","requestId":"req_n",
