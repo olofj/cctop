@@ -51,24 +51,32 @@ impl std::fmt::Display for PricingSource {
 /// understand, and silently using stale builtin prices would produce
 /// misleading cost numbers.
 pub fn load_model_pricing(offline: bool) -> (HashMap<String, ModelPricing>, PricingSource) {
+    load_with(cache_path().as_deref(), fetch_litellm, offline)
+}
+
+/// The fallback chain with its I/O seams injected, so tests can drive it
+/// without the network or the real cache directory.
+fn load_with(
+    cache: Option<&Path>,
+    fetch: impl FnOnce() -> Result<String, Box<dyn std::error::Error>>,
+    offline: bool,
+) -> (HashMap<String, ModelPricing>, PricingSource) {
     let builtin_count = crate::pricing::builtin_pricing().len();
     if offline {
         return (HashMap::new(), PricingSource::BuiltIn(builtin_count));
     }
 
-    let cache = cache_path();
-
     // Fresh cache: skip the network entirely so startup never stalls.
-    if let Some(json) = read_fresh_cache(cache.as_deref()) {
+    if let Some(json) = read_fresh_cache(cache) {
         let models = parse_or_die(&json, Origin::Cache);
         let count = models.len();
         return (models, PricingSource::Cached(count));
     }
 
-    match fetch_litellm() {
+    match fetch() {
         Ok(json) => {
             let models = parse_or_die(&json, Origin::Download);
-            if let Some(path) = &cache {
+            if let Some(path) = cache {
                 write_cache_atomically(path, &json);
             }
             let count = models.len();
@@ -77,7 +85,7 @@ pub fn load_model_pricing(offline: bool) -> (HashMap<String, ModelPricing>, Pric
         Err(e) => {
             eprintln!("Note: could not fetch model prices: {e}");
             // Network down: a stale cache beats builtin-only.
-            if let Some(json) = read_any_cache(cache.as_deref()) {
+            if let Some(json) = read_any_cache(cache) {
                 let models = parse_or_die(&json, Origin::Cache);
                 let count = models.len();
                 (models, PricingSource::Cached(count))
@@ -330,6 +338,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("0 Claude model entries"), "err={err}");
+    }
+
+    // --- load_with: the full fallback chain ---
+
+    #[test]
+    fn load_offline_is_builtin_only_and_never_fetches() {
+        let (map, source) = load_with(None, || panic!("offline must not fetch"), true);
+        assert!(map.is_empty());
+        assert!(matches!(source, PricingSource::BuiltIn(_)));
+    }
+
+    #[test]
+    fn load_fresh_cache_skips_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("litellm-pricing.json");
+        fs::write(&path, FIXTURE).unwrap();
+
+        let (map, source) = load_with(Some(&path), || panic!("fresh cache must skip fetch"), false);
+        assert!(matches!(source, PricingSource::Cached(4)));
+        assert!(map.contains_key("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn load_download_writes_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("litellm-pricing.json");
+
+        let (map, source) = load_with(Some(&path), || Ok(FIXTURE.to_string()), false);
+        assert!(matches!(source, PricingSource::Downloaded(4)));
+        assert!(map.contains_key("claude-test-derived"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), FIXTURE);
+    }
+
+    #[test]
+    fn load_network_failure_falls_back_to_stale_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("litellm-pricing.json");
+        fs::write(&path, FIXTURE).unwrap();
+        let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - CACHE_MAX_AGE - Duration::from_secs(60))
+            .unwrap();
+        drop(f);
+
+        let (_, source) = load_with(Some(&path), || Err("network down".into()), false);
+        assert!(matches!(source, PricingSource::Cached(4)));
+    }
+
+    #[test]
+    fn load_no_cache_no_network_is_builtin_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+
+        let (map, source) = load_with(Some(&path), || Err("network down".into()), false);
+        assert!(map.is_empty());
+        assert!(matches!(source, PricingSource::BuiltIn(_)));
     }
 
     #[test]
