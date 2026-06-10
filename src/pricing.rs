@@ -64,14 +64,22 @@ impl ModelPricing {
 /// Runtime pricing table, set at startup from downloaded or cached data.
 static ACTIVE_PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
 
-/// Install the dynamically loaded pricing table (call before any lookups).
-/// The builtin table is the offline floor; dynamic entries are merged on top
-/// so builtin-only models (e.g. fable-5, absent from LiteLLM) keep their
-/// rates when a download succeeds.
-pub fn set_pricing(dynamic: HashMap<String, ModelPricing>) {
+/// The builtin floor with a dynamic table merged on top, so builtin-only
+/// models (e.g. fable-5, absent from LiteLLM) keep their rates when a
+/// download succeeds.
+fn merged_pricing(dynamic: HashMap<String, ModelPricing>) -> HashMap<String, ModelPricing> {
     let mut map = builtin_pricing();
     map.extend(dynamic);
-    let _ = ACTIVE_PRICING.set(map);
+    map
+}
+
+/// Install the dynamically loaded pricing table. Must be called before any
+/// cost lookup: a lookup initializes the table to builtin-only, and pricing
+/// arriving after that would be silently discarded — panic instead.
+pub fn set_pricing(dynamic: HashMap<String, ModelPricing>) {
+    if ACTIVE_PRICING.set(merged_pricing(dynamic)).is_err() {
+        panic!("set_pricing called after a pricing lookup already initialized the table");
+    }
 }
 
 /// Get the active pricing table, falling back to built-in if none was set.
@@ -755,13 +763,12 @@ mod tests {
 
     #[test]
     fn dynamic_entries_override_builtin() {
-        let mut map = builtin_pricing();
         let mut dynamic = HashMap::new();
         dynamic.insert(
             "claude-opus-4-6".to_string(),
             ModelPricing::new(mtok(7.0), mtok(25.0), mtok(6.25), mtok(0.50)),
         );
-        map.extend(dynamic);
+        let map = merged_pricing(dynamic);
         assert_eq!(lookup_in(&map, "claude-opus-4-6").unwrap().input, mtok(7.0));
         // Untouched keys keep builtin rates.
         assert_eq!(lookup_in(&map, "claude-opus-4-7").unwrap().input, mtok(5.0));
@@ -780,13 +787,12 @@ mod tests {
     fn builtin_only_models_survive_merge() {
         // fable-5 is not in LiteLLM; merging a dynamic table on top of the
         // builtin floor must not lose it.
-        let mut map = builtin_pricing();
         let mut dynamic = HashMap::new();
         dynamic.insert(
             "claude-opus-4-7".to_string(),
             ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)),
         );
-        map.extend(dynamic);
+        let map = merged_pricing(dynamic);
         assert_eq!(lookup_in(&map, "claude-fable-5").unwrap().input, mtok(10.0));
     }
 }
