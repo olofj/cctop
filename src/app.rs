@@ -178,9 +178,14 @@ impl AppState {
         self.cache_dirty = true;
     }
 
+    /// The display window as a time::Duration (for cutoff arithmetic).
+    fn window_cutoff(&self) -> time::Duration {
+        time::Duration::seconds(self.window.as_secs() as i64)
+    }
+
     /// Total token rate across all projects within the current window.
     pub fn total_rate(&self, now: OffsetDateTime) -> (f64, f64, f64) {
-        let cutoff = now - time::Duration::try_from(self.window.as_duration()).unwrap();
+        let cutoff = now - self.window_cutoff();
         let minutes = self.window.as_minutes();
         let mut input = 0u64;
         let mut output = 0u64;
@@ -201,7 +206,7 @@ impl AppState {
 
     /// Total cost within the current display window.
     pub fn total_window_cost(&self, now: OffsetDateTime) -> f64 {
-        let cutoff = now - time::Duration::try_from(self.window.as_duration()).unwrap();
+        let cutoff = now - self.window_cutoff();
         self.entries
             .iter()
             .filter(|e| e.timestamp >= cutoff)
@@ -211,7 +216,7 @@ impl AppState {
 
     /// Total unique sessions within the current display window.
     pub fn total_window_sessions(&self, now: OffsetDateTime) -> usize {
-        let cutoff = now - time::Duration::try_from(self.window.as_duration()).unwrap();
+        let cutoff = now - self.window_cutoff();
         let mut seen = HashSet::new();
         for e in &self.entries {
             if e.timestamp >= cutoff {
@@ -972,20 +977,17 @@ fn f64_cmp(a: f64, b: f64) -> std::cmp::Ordering {
     a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// The single model used, "mixed" for several, "-" for none.
 fn dominant_model(model_costs: &HashMap<String, f64>) -> String {
-    if model_costs.len() > 1 {
-        return "mixed".to_string();
+    match model_costs.len() {
+        0 => "-".to_string(),
+        1 => model_costs.keys().next().unwrap().clone(),
+        _ => "mixed".to_string(),
     }
-    model_costs
-        .iter()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(m, _)| m.clone())
-        .unwrap_or_else(|| "-".to_string())
 }
 
 fn short_id(id: &str) -> String {
-    let s: String = id.chars().take(12).collect();
-    s
+    id.chars().take(12).collect()
 }
 
 /// Apply triangular smoothing [0.25, 0.5, 0.25] to histogram buckets.

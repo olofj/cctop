@@ -514,7 +514,8 @@ fn block_char(bar_height: f64, row_bottom: f64, row_top: f64) -> char {
     if bar_height >= row_top {
         '█'
     } else {
-        let fill = ((bar_height - row_bottom) / 8.0 * 8.0) as usize;
+        // bar_height and row_bottom are both in eighth-block units already.
+        let fill = (bar_height - row_bottom) as usize;
         BLOCKS[fill.min(8)]
     }
 }

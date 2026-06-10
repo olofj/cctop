@@ -112,7 +112,6 @@ impl ProgressRecord {
 
 /// A parsed token usage entry, ready for windowed aggregation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TokenEntry {
     pub timestamp: OffsetDateTime,
     pub project: String,
@@ -293,7 +292,6 @@ pub struct DisplayRow {
     pub tree_key: String,
 }
 
-/// One time-bucket for the histogram.
 /// Top-level grouping mode for the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {

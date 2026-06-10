@@ -65,7 +65,7 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
 
     // Direct assistant line first; otherwise a progress wrapper whose
     // usage is nested under data.message.message.
-    let record: RawRecord = match serde_json::from_str(line) {
+    let mut record: RawRecord = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(_) => serde_json::from_str::<ProgressRecord>(line)
             .ok()
@@ -77,19 +77,18 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
         return None;
     }
 
+    let cost = calculate_cost(&record);
+
     let model = record
         .message
         .model
-        .clone()
+        .take()
         .unwrap_or_else(|| "unknown".to_string());
-
     let display_model = if record.message.usage.speed.as_deref() == Some("fast") {
         format!("{}-fast", model)
     } else {
         model
     };
-
-    let cost = calculate_cost(&record);
 
     Some(TokenEntry {
         timestamp,
@@ -102,8 +101,8 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
         cache_write_tokens: record.message.usage.cache_creation_token_count(),
         cache_read_tokens: record.message.usage.cache_read_input_tokens,
         cost,
-        message_id: record.message.id.clone(),
-        request_id: record.request_id.clone(),
+        message_id: record.message.id,
+        request_id: record.request_id,
         is_sidechain: record.is_sidechain,
         has_speed: record.message.usage.speed.is_some(),
     })
