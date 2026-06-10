@@ -17,7 +17,7 @@ think top(1) for your Claude Code spend.
 - **Hierarchical tree view**: projects > sessions > subagents, expandable with Enter
 - **Per-row sparkline** showing each project's activity trend over the window
 - **Stacked bar histogram** on the lower half with color-coded token types
-  (green = input, blue = output, magenta = cache)
+  (steel blue = input, teal = output, gray = cache)
 - **Configurable sliding window**: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
 - **Wall-clock-quantized bucketing** so the chart slides smoothly instead of jittering
 - **Fast startup**: skips files untouched for 24h and tail-reads the rest,
@@ -88,6 +88,9 @@ Options:
                            Values: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
                            (anything else is an error)
   -p, --project <PROJECT>  Filter to projects matching this substring
+                           (hyphenated names match too: Claude encodes '/'
+                           as '-' in project dir names, so "my-app" displays
+                           as "my/app" — the filter accepts either form)
       --list-projects      List all discovered projects and exit
       --tick-rate <MS>     UI refresh interval in milliseconds [default: 3000]
   -O, --offline            Use built-in pricing only (skip the LiteLLM
@@ -123,11 +126,11 @@ The top half shows a **table** with one row per project:
 - **IN/min** -- input tokens per minute (prompt tokens sent to the API)
 - **OUT/min** -- output tokens per minute (response tokens from the API)
 - **$/min** -- estimated cost per minute based on the model pricing table
-- **$TOTAL** -- total cost for this project across all loaded data
+- **$TOTAL** -- total cost for this project within the current window
 - **LAST** -- time since the last API response
 
 The bottom half shows a **histogram** of total token activity over the window,
-color-coded by token type (green = input, blue = output, magenta = cache).
+color-coded by token type (steel blue = input, teal = output, gray = cache).
 
 Projects can be **expanded** with Enter to show individual sessions, and
 sessions can be expanded further to show subagent activity.
