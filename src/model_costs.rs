@@ -148,7 +148,10 @@ fn write_cache_atomically(path: &Path, contents: &str) {
     if fs::create_dir_all(dir).is_err() {
         return;
     }
-    let tmp = path.with_extension("json.tmp");
+    // Per-PID temp name: two concurrent cctop instances interleaving writes
+    // to one temp file could rename a corrupt cache into place — which is
+    // fatal at the next startup by design.
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     if fs::write(&tmp, contents).is_ok() {
         let _ = fs::rename(&tmp, path);
     }
@@ -357,7 +360,11 @@ mod tests {
         let path = dir.path().join("nested").join("litellm-pricing.json");
         write_cache_atomically(&path, "{\"k\":1}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"k\":1}");
-        // The temp file must not linger.
-        assert!(!path.with_extension("json.tmp").exists());
+        // No temp file may linger — the final file is the dir's only entry.
+        let entries: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["litellm-pricing.json"]);
     }
 }
