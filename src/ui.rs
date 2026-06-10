@@ -135,7 +135,17 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime)
         )),
     ]);
 
-    let header = Paragraph::new(vec![title_line, summary_line, Line::raw("")]);
+    // Watcher errors land in app.status; surface them instead of letting a
+    // dead watcher silently show stale numbers.
+    let status_line = match &app.status {
+        Some(msg) => Line::from(Span::styled(
+            format!("  ⚠ {msg}"),
+            Style::default().fg(Color::Indexed(167)), // muted red
+        )),
+        None => Line::raw(""),
+    };
+
+    let header = Paragraph::new(vec![title_line, summary_line, status_line]);
     f.render_widget(header, area);
 }
 

@@ -108,6 +108,14 @@ fn renders_model_view_with_toggled_modes() {
 }
 
 #[test]
+fn renders_watcher_status_message() {
+    let mut app = app_with_data();
+    app.status = Some("Failed to watch /some/dir: inotify limit".to_string());
+    let content = draw(120, 40, &mut app);
+    assert!(content.contains("Failed to watch"));
+}
+
+#[test]
 fn renders_empty_state() {
     let mut app = AppState::new(WindowSize::W5m, None);
     let content = draw(80, 24, &mut app);
