@@ -63,8 +63,11 @@ pub struct AppState {
     /// Hidden project names.
     hidden: HashSet<String>,
 
-    /// Optional project name substring filter (from --project flag).
-    project_filter: Option<String>,
+    /// Optional project name substring filter (from --project flag), stored
+    /// as (given, dashes-as-slashes). Project names are decoded from dir
+    /// names where '/' was encoded as '-', so a real "my-app" displays as
+    /// "my/app" — the slashed variant lets `--project my-app` still match.
+    project_filter: Option<(String, String)>,
 
     /// Whether the help overlay is visible.
     pub show_help: bool,
@@ -95,7 +98,10 @@ impl AppState {
             view_mode: ViewMode::ByProject,
             show_help: false,
             hidden: HashSet::new(),
-            project_filter,
+            project_filter: project_filter.map(|f| {
+                let slashed = f.replace('-', "/");
+                (f, slashed)
+            }),
             status: None,
             rows_cache: Vec::new(),
             cache_dirty: true,
@@ -107,9 +113,11 @@ impl AppState {
     /// a more complete twin; rows rebuild from storage on the next draw).
     pub fn ingest(&mut self, entries: Vec<TokenEntry>) {
         for entry in entries {
-            // Apply project filter
-            if let Some(ref filter) = self.project_filter
-                && !entry.project.contains(filter.as_str())
+            // Apply project filter (either the literal form or the
+            // dashes-as-slashes variant — see the field comment).
+            if let Some((ref given, ref slashed)) = self.project_filter
+                && !entry.project.contains(given.as_str())
+                && !entry.project.contains(slashed.as_str())
             {
                 continue;
             }
@@ -2137,6 +2145,21 @@ mod tests {
         ]);
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].project, "/home/user/myproj");
+    }
+
+    #[test]
+    fn project_filter_matches_hyphenated_project_names() {
+        // A real dir "/home/u/my-app" is encoded "-home-u-my-app" and
+        // decodes lossily to "/home/u/my/app"; --project my-app must
+        // still match it.
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, Some("my-app".to_string()));
+        app.ingest(vec![
+            make_entry("/home/u/my/app", "s1", now, 100),
+            make_entry("/home/u/other", "s2", now, 200),
+        ]);
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].project, "/home/u/my/app");
     }
 
     #[test]
