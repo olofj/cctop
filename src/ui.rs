@@ -99,7 +99,7 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime)
 
     let rate_color = rate_color(total_rate);
 
-    let title_line = Line::from(vec![
+    let mut title_spans = vec![
         Span::styled(
             " cctop ",
             Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
@@ -115,12 +115,20 @@ fn render_header(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime)
             format!("{}/min", format_cost(cost_rate)),
             Style::default().fg(cost_color(cost_rate)),
         ),
-        Span::raw(" ".repeat(area.width.saturating_sub(56) as usize)),
-        Span::styled(
-            format!("Window: [{}]", app.window.label()),
+    ];
+    // Right-align the window label against the measured left content (the
+    // rate strings vary in width), dropping it when there's no room.
+    let window_label = format!("Window: [{}]", app.window.label());
+    let left_width: usize = title_spans.iter().map(|s| s.width()).sum();
+    let pad = (area.width as usize).saturating_sub(left_width + window_label.len());
+    if pad > 0 {
+        title_spans.push(Span::raw(" ".repeat(pad)));
+        title_spans.push(Span::styled(
+            window_label,
             Style::default().fg(COL_KEY).add_modifier(Modifier::BOLD),
-        ),
-    ]);
+        ));
+    }
+    let title_line = Line::from(title_spans);
 
     let summary_line = Line::from(vec![
         Span::raw("  Window: "),
