@@ -415,89 +415,53 @@ impl AppState {
         for entry in &self.entries {
             let proj = project_data
                 .entry(entry.project.clone())
-                .or_insert_with(|| ProjectAgg::new(entry.project.clone()));
+                .or_insert_with(|| ProjectAgg {
+                    name: entry.project.clone(),
+                    ..Default::default()
+                });
+            proj.core.touch(entry.timestamp);
 
-            if let Some(idx) = grid.index_of(entry.timestamp) {
-                let total = entry.input_tokens
-                    + entry.output_tokens
-                    + entry.cache_write_tokens
-                    + entry.cache_read_tokens;
+            // Session and subagent structs exist for every entry (so "last
+            // activity" shows even when the row has no in-window usage);
+            // totals only accumulate inside the window.
+            let sess = proj
+                .session_data
+                .entry(entry.session_id.clone())
+                .or_insert_with(|| SessionAgg {
+                    session_id: entry.session_id.clone(),
+                    ..Default::default()
+                });
+            sess.core.touch(entry.timestamp);
+            let agent = entry.subagent_id.as_ref().map(|agent_id| {
+                let agent = sess
+                    .subagent_data
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| SubagentAgg {
+                        agent_id: agent_id.clone(),
+                        ..Default::default()
+                    });
+                agent.core.touch(entry.timestamp);
+                agent
+            });
 
-                proj.input_tokens += entry.input_tokens;
-                proj.output_tokens += entry.output_tokens;
-                proj.cost += entry.cost;
-                proj.sessions.insert(entry.session_id.clone());
-                *proj.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
-                proj.sparkline[idx] += total;
+            let Some(idx) = grid.index_of(entry.timestamp) else {
+                continue;
+            };
 
-                // Per-model aggregation
-                let model_agg = proj
-                    .model_data
-                    .entry(entry.model.clone())
-                    .or_insert_with(|| ModelAgg::new(entry.model.clone()));
-                model_agg.input_tokens += entry.input_tokens;
-                model_agg.output_tokens += entry.output_tokens;
-                model_agg.cost += entry.cost;
-                model_agg.sparkline[idx] += total;
-                model_agg.sessions.insert(entry.session_id.clone());
-                if model_agg
-                    .last_activity
-                    .is_none_or(|ts| entry.timestamp > ts)
-                {
-                    model_agg.last_activity = Some(entry.timestamp);
-                }
+            proj.core.add(entry, idx);
+            proj.sessions.insert(entry.session_id.clone());
+            *proj.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
 
-                let sess = proj
-                    .session_data
-                    .entry(entry.session_id.clone())
-                    .or_insert_with(|| SessionAgg::new(entry.session_id.clone()));
-                sess.input_tokens += entry.input_tokens;
-                sess.output_tokens += entry.output_tokens;
-                sess.cost += entry.cost;
-                *sess.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
-                sess.sparkline[idx] += total;
+            let model_agg = proj.model_data.entry(entry.model.clone()).or_default();
+            model_agg.core.add(entry, idx);
+            model_agg.sessions.insert(entry.session_id.clone());
 
-                if let Some(ref agent_id) = entry.subagent_id {
-                    let agent = sess
-                        .subagent_data
-                        .entry(agent_id.clone())
-                        .or_insert_with(|| SubagentAgg::new(agent_id.clone()));
-                    agent.input_tokens += entry.input_tokens;
-                    agent.output_tokens += entry.output_tokens;
-                    agent.cost += entry.cost;
-                    *agent.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
-                    agent.sparkline[idx] += total;
+            sess.core.add(entry, idx);
+            *sess.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
 
-                    if agent.last_activity.is_none_or(|ts| entry.timestamp > ts) {
-                        agent.last_activity = Some(entry.timestamp);
-                    }
-                }
-
-                if sess.last_activity.is_none_or(|ts| entry.timestamp > ts) {
-                    sess.last_activity = Some(entry.timestamp);
-                }
-            } else {
-                // Not in window — still track session/subagent structs for last_activity
-                let sess = proj
-                    .session_data
-                    .entry(entry.session_id.clone())
-                    .or_insert_with(|| SessionAgg::new(entry.session_id.clone()));
-                if sess.last_activity.is_none_or(|ts| entry.timestamp > ts) {
-                    sess.last_activity = Some(entry.timestamp);
-                }
-                if let Some(ref agent_id) = entry.subagent_id {
-                    let agent = sess
-                        .subagent_data
-                        .entry(agent_id.clone())
-                        .or_insert_with(|| SubagentAgg::new(agent_id.clone()));
-                    if agent.last_activity.is_none_or(|ts| entry.timestamp > ts) {
-                        agent.last_activity = Some(entry.timestamp);
-                    }
-                }
-            }
-
-            if proj.last_activity.is_none_or(|ts| entry.timestamp > ts) {
-                proj.last_activity = Some(entry.timestamp);
+            if let Some(agent) = agent {
+                agent.core.add(entry, idx);
+                *agent.model_costs.entry(entry.model.clone()).or_default() += entry.cost;
             }
         }
 
@@ -536,14 +500,14 @@ impl AppState {
             rows.push(DisplayRow {
                 kind: RowKind::Project,
                 label: proj.name.clone(),
-                sparkline: proj.sparkline,
+                sparkline: proj.core.sparkline,
                 session_count: proj.sessions.len(),
                 model: dominant_model(&proj.model_costs),
-                input_per_min: proj.input_tokens as f64 / minutes,
-                output_per_min: proj.output_tokens as f64 / minutes,
-                cost_per_min: proj.cost / minutes,
-                cost_today: proj.cost,
-                last_activity: proj.last_activity,
+                input_per_min: proj.core.input_tokens as f64 / minutes,
+                output_per_min: proj.core.output_tokens as f64 / minutes,
+                cost_per_min: proj.core.cost / minutes,
+                cost_today: proj.core.cost,
+                last_activity: proj.core.last_activity,
                 is_expanded,
                 depth: 0,
                 tree_key: proj.name.clone(),
@@ -551,24 +515,24 @@ impl AppState {
 
             if is_expanded {
                 if proj.model_data.len() > 1 {
-                    let mut models: Vec<&ModelAgg> = proj.model_data.values().collect();
-                    models.sort_by(|a, b| f64_cmp(b.cost, a.cost));
+                    let mut models: Vec<(&String, &ModelAgg)> = proj.model_data.iter().collect();
+                    models.sort_by(|a, b| f64_cmp(b.1.core.cost, a.1.core.cost));
 
-                    for model in models {
-                        let model_key = format!("{}\0{}", proj.name, model.model_name);
+                    for (model_name, model) in models {
+                        let model_key = format!("{}\0{}", proj.name, model_name);
                         let model_expanded = self.expanded.contains(&model_key);
 
                         rows.push(DisplayRow {
                             kind: RowKind::Model,
-                            label: model.model_name.clone(),
-                            sparkline: model.sparkline,
+                            label: model_name.clone(),
+                            sparkline: model.core.sparkline,
                             session_count: model.sessions.len(),
-                            model: model.model_name.clone(),
-                            input_per_min: model.input_tokens as f64 / minutes,
-                            output_per_min: model.output_tokens as f64 / minutes,
-                            cost_per_min: model.cost / minutes,
-                            cost_today: model.cost,
-                            last_activity: model.last_activity,
+                            model: model_name.clone(),
+                            input_per_min: model.core.input_tokens as f64 / minutes,
+                            output_per_min: model.core.output_tokens as f64 / minutes,
+                            cost_per_min: model.core.cost / minutes,
+                            cost_today: model.core.cost,
+                            last_activity: model.core.last_activity,
                             is_expanded: model_expanded,
                             depth: 1,
                             tree_key: model_key.clone(),
@@ -600,22 +564,21 @@ impl AppState {
                 continue;
             }
             for (model_name, model_agg) in &proj.model_data {
-                let gm = global_models
-                    .entry(model_name.clone())
-                    .or_insert_with(|| GlobalModelAgg::new(model_name.clone()));
-                gm.input_tokens += model_agg.input_tokens;
-                gm.output_tokens += model_agg.output_tokens;
-                gm.cost += model_agg.cost;
+                let gm =
+                    global_models
+                        .entry(model_name.clone())
+                        .or_insert_with(|| GlobalModelAgg {
+                            model_name: model_name.clone(),
+                            ..Default::default()
+                        });
+                gm.core.input_tokens += model_agg.core.input_tokens;
+                gm.core.output_tokens += model_agg.core.output_tokens;
+                gm.core.cost += model_agg.core.cost;
                 gm.session_count += model_agg.sessions.len();
-                for (i, v) in model_agg.sparkline.iter().enumerate() {
-                    gm.sparkline[i] += v;
+                for (i, v) in model_agg.core.sparkline.iter().enumerate() {
+                    gm.core.sparkline[i] += v;
                 }
-                if gm
-                    .last_activity
-                    .is_none_or(|t| model_agg.last_activity.is_some_and(|mt| mt > t))
-                {
-                    gm.last_activity = model_agg.last_activity;
-                }
+                gm.core.last_activity = gm.core.last_activity.max(model_agg.core.last_activity);
                 gm.projects.push((proj.name.clone(), model_agg));
             }
         }
@@ -626,17 +589,17 @@ impl AppState {
                 self.sort_column,
                 self.sort_ascending,
                 (
-                    a.cost,
-                    a.input_tokens,
-                    a.output_tokens,
-                    a.last_activity,
+                    a.core.cost,
+                    a.core.input_tokens,
+                    a.core.output_tokens,
+                    a.core.last_activity,
                     &a.model_name,
                 ),
                 (
-                    b.cost,
-                    b.input_tokens,
-                    b.output_tokens,
-                    b.last_activity,
+                    b.core.cost,
+                    b.core.input_tokens,
+                    b.core.output_tokens,
+                    b.core.last_activity,
                     &b.model_name,
                 ),
             )
@@ -649,14 +612,14 @@ impl AppState {
             rows.push(DisplayRow {
                 kind: RowKind::Model,
                 label: gm.model_name.clone(),
-                sparkline: gm.sparkline,
+                sparkline: gm.core.sparkline,
                 session_count: gm.session_count,
                 model: gm.model_name.clone(),
-                input_per_min: gm.input_tokens as f64 / minutes,
-                output_per_min: gm.output_tokens as f64 / minutes,
-                cost_per_min: gm.cost / minutes,
-                cost_today: gm.cost,
-                last_activity: gm.last_activity,
+                input_per_min: gm.core.input_tokens as f64 / minutes,
+                output_per_min: gm.core.output_tokens as f64 / minutes,
+                cost_per_min: gm.core.cost / minutes,
+                cost_today: gm.core.cost,
+                last_activity: gm.core.last_activity,
                 is_expanded,
                 depth: 0,
                 tree_key: model_key.clone(),
@@ -670,14 +633,14 @@ impl AppState {
                     rows.push(DisplayRow {
                         kind: RowKind::Project,
                         label: proj_name.clone(),
-                        sparkline: model_agg.sparkline,
+                        sparkline: model_agg.core.sparkline,
                         session_count: model_agg.sessions.len(),
                         model: gm.model_name.clone(),
-                        input_per_min: model_agg.input_tokens as f64 / minutes,
-                        output_per_min: model_agg.output_tokens as f64 / minutes,
-                        cost_per_min: model_agg.cost / minutes,
-                        cost_today: model_agg.cost,
-                        last_activity: model_agg.last_activity,
+                        input_per_min: model_agg.core.input_tokens as f64 / minutes,
+                        output_per_min: model_agg.core.output_tokens as f64 / minutes,
+                        cost_per_min: model_agg.core.cost / minutes,
+                        cost_today: model_agg.core.cost,
+                        last_activity: model_agg.core.last_activity,
                         is_expanded: proj_expanded,
                         depth: 1,
                         tree_key: proj_key.clone(),
@@ -710,7 +673,7 @@ impl AppState {
         rows: &mut Vec<DisplayRow>,
     ) {
         let mut sessions: Vec<&SessionAgg> = proj.session_data.values().collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.core.last_activity));
 
         for sess in sessions {
             self.emit_one_session(sess, parent_key, depth, minutes, rows);
@@ -731,7 +694,7 @@ impl AppState {
             .values()
             .filter(|s| model_sessions.contains(&s.session_id))
             .collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.core.last_activity));
 
         for sess in sessions {
             self.emit_one_session(sess, parent_key, 2, minutes, rows);
@@ -753,14 +716,14 @@ impl AppState {
         rows.push(DisplayRow {
             kind: RowKind::Session,
             label: short_id(&sess.session_id),
-            sparkline: sess.sparkline,
+            sparkline: sess.core.sparkline,
             session_count: 0,
             model: dominant_model(&sess.model_costs),
-            input_per_min: sess.input_tokens as f64 / minutes,
-            output_per_min: sess.output_tokens as f64 / minutes,
-            cost_per_min: sess.cost / minutes,
-            cost_today: sess.cost,
-            last_activity: sess.last_activity,
+            input_per_min: sess.core.input_tokens as f64 / minutes,
+            output_per_min: sess.core.output_tokens as f64 / minutes,
+            cost_per_min: sess.core.cost / minutes,
+            cost_today: sess.core.cost,
+            last_activity: sess.core.last_activity,
             is_expanded: sess_expanded,
             depth,
             tree_key: sess_key.clone(),
@@ -768,20 +731,20 @@ impl AppState {
 
         if sess_expanded {
             let mut agents: Vec<&SubagentAgg> = sess.subagent_data.values().collect();
-            agents.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
+            agents.sort_by_key(|a| std::cmp::Reverse(a.core.last_activity));
 
             for agent in agents {
                 rows.push(DisplayRow {
                     kind: RowKind::Subagent,
                     label: short_id(&agent.agent_id),
-                    sparkline: agent.sparkline,
+                    sparkline: agent.core.sparkline,
                     session_count: 0,
                     model: dominant_model(&agent.model_costs),
-                    input_per_min: agent.input_tokens as f64 / minutes,
-                    output_per_min: agent.output_tokens as f64 / minutes,
-                    cost_per_min: agent.cost / minutes,
-                    cost_today: agent.cost,
-                    last_activity: agent.last_activity,
+                    input_per_min: agent.core.input_tokens as f64 / minutes,
+                    output_per_min: agent.core.output_tokens as f64 / minutes,
+                    cost_per_min: agent.core.cost / minutes,
+                    cost_today: agent.core.cost,
+                    last_activity: agent.core.last_activity,
                     is_expanded: false,
                     depth: depth + 1,
                     // A real key: selection is restored by tree_key after
@@ -799,17 +762,17 @@ impl AppState {
                 self.sort_column,
                 self.sort_ascending,
                 (
-                    a.cost,
-                    a.input_tokens,
-                    a.output_tokens,
-                    a.last_activity,
+                    a.core.cost,
+                    a.core.input_tokens,
+                    a.core.output_tokens,
+                    a.core.last_activity,
                     &a.name,
                 ),
                 (
-                    b.cost,
-                    b.input_tokens,
-                    b.output_tokens,
-                    b.last_activity,
+                    b.core.cost,
+                    b.core.input_tokens,
+                    b.core.output_tokens,
+                    b.core.last_activity,
                     &b.name,
                 ),
             )
@@ -1055,136 +1018,71 @@ fn weighted_avg(prev: u64, curr: u64, next: u64) -> u64 {
 
 // --- Internal aggregation structs ---
 
-/// Cross-project model aggregation for model-first view.
-struct GlobalModelAgg<'a> {
-    model_name: String,
+/// Token/cost accumulator shared by every aggregation level.
+#[derive(Default)]
+struct Agg {
     input_tokens: u64,
     output_tokens: u64,
     cost: f64,
-    session_count: usize,
     last_activity: Option<OffsetDateTime>,
     sparkline: [u64; SPARKLINE_BUCKETS],
-    projects: Vec<(String, &'a ModelAgg)>,
 }
 
-impl<'a> GlobalModelAgg<'a> {
-    fn new(model_name: String) -> Self {
-        Self {
-            model_name,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: 0.0,
-            session_count: 0,
-            last_activity: None,
-            sparkline: [0; SPARKLINE_BUCKETS],
-            projects: Vec::new(),
-        }
+impl Agg {
+    /// Fold an in-window entry into the totals (idx = sparkline bucket).
+    fn add(&mut self, entry: &TokenEntry, idx: usize) {
+        self.input_tokens += entry.input_tokens;
+        self.output_tokens += entry.output_tokens;
+        self.cost += entry.cost;
+        self.sparkline[idx] += entry.token_total();
+        self.touch(entry.timestamp);
+    }
+
+    /// Track last activity, also for entries outside the window.
+    fn touch(&mut self, ts: OffsetDateTime) {
+        self.last_activity = self.last_activity.max(Some(ts));
     }
 }
 
-struct ModelAgg {
+/// Cross-project model aggregation for model-first view.
+#[derive(Default)]
+struct GlobalModelAgg<'a> {
     model_name: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost: f64,
-    last_activity: Option<OffsetDateTime>,
-    sparkline: [u64; SPARKLINE_BUCKETS],
+    core: Agg,
+    session_count: usize,
+    projects: Vec<(String, &'a ModelAgg)>,
+}
+
+#[derive(Default)]
+struct ModelAgg {
+    core: Agg,
     /// Session IDs that used this model.
     sessions: HashSet<String>,
 }
 
-impl ModelAgg {
-    fn new(model_name: String) -> Self {
-        Self {
-            model_name,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: 0.0,
-            last_activity: None,
-            sparkline: [0; SPARKLINE_BUCKETS],
-            sessions: HashSet::new(),
-        }
-    }
-}
-
+#[derive(Default)]
 struct ProjectAgg {
     name: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost: f64,
+    core: Agg,
     sessions: HashSet<String>,
     model_costs: HashMap<String, f64>,
-    last_activity: Option<OffsetDateTime>,
-    sparkline: [u64; SPARKLINE_BUCKETS],
     session_data: BTreeMap<String, SessionAgg>,
     model_data: BTreeMap<String, ModelAgg>,
 }
 
-impl ProjectAgg {
-    fn new(name: String) -> Self {
-        Self {
-            name,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: 0.0,
-            sessions: HashSet::new(),
-            model_costs: HashMap::new(),
-            last_activity: None,
-            sparkline: [0; SPARKLINE_BUCKETS],
-            session_data: BTreeMap::new(),
-            model_data: BTreeMap::new(),
-        }
-    }
-}
-
+#[derive(Default)]
 struct SessionAgg {
     session_id: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost: f64,
+    core: Agg,
     model_costs: HashMap<String, f64>,
-    last_activity: Option<OffsetDateTime>,
-    sparkline: [u64; SPARKLINE_BUCKETS],
     subagent_data: BTreeMap<String, SubagentAgg>,
 }
 
-impl SessionAgg {
-    fn new(session_id: String) -> Self {
-        Self {
-            session_id,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: 0.0,
-            model_costs: HashMap::new(),
-            last_activity: None,
-            sparkline: [0; SPARKLINE_BUCKETS],
-            subagent_data: BTreeMap::new(),
-        }
-    }
-}
-
+#[derive(Default)]
 struct SubagentAgg {
     agent_id: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost: f64,
+    core: Agg,
     model_costs: HashMap<String, f64>,
-    last_activity: Option<OffsetDateTime>,
-    sparkline: [u64; SPARKLINE_BUCKETS],
-}
-
-impl SubagentAgg {
-    fn new(agent_id: String) -> Self {
-        Self {
-            agent_id,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: 0.0,
-            model_costs: HashMap::new(),
-            last_activity: None,
-            sparkline: [0; SPARKLINE_BUCKETS],
-        }
-    }
 }
 
 // --- Formatting helpers ---
