@@ -567,7 +567,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
     if chart_cols > 0 {
         let bar_secs = app.window.as_secs() as f64 / chart_cols as f64;
         let bar_info = format!("{}/bar", format_duration_short(bar_secs));
-        let pad = area.width as usize - keys_width - bar_info.len();
+        // Saturate: on terminals narrower than the key hints, skip the label
+        // instead of underflowing.
+        let pad = (area.width as usize).saturating_sub(keys_width + bar_info.len());
         if pad > 2 {
             spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(bar_info, Style::default().fg(COL_DIM)));
