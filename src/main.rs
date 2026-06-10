@@ -33,7 +33,8 @@ struct Cli {
     list_projects: bool,
 
     /// UI refresh interval in milliseconds
-    #[arg(long, default_value = "3000")]
+    /// (0 would spin the event loop at 100% CPU)
+    #[arg(long, default_value = "3000", value_parser = clap::value_parser!(u64).range(1..))]
     tick_rate: u64,
 
     /// Use built-in pricing only (skip the LiteLLM fetch and cache)
