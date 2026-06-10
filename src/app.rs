@@ -1775,6 +1775,158 @@ mod tests {
         assert_eq!(app.entries.len(), 2);
     }
 
+    // --- Row emission tests ---
+
+    #[test]
+    fn expanded_project_emits_models_then_sessions() {
+        // Two models, two sessions in one project: the project row shows
+        // "mixed", expanding reveals model rows (cost-descending), and
+        // expanding a model reveals only that model's sessions at depth 2.
+        let now = fixed_now();
+        let ts = now - time::Duration::seconds(10);
+        let mut app = AppState::new(WindowSize::W5m, None);
+        let mut a = make_entry("/proj", "s-alpha", ts, 100);
+        a.model = "model-a".to_string();
+        a.cost = 9.0;
+        let mut b = make_entry("/proj", "s-beta", ts, 200);
+        b.model = "model-b".to_string();
+        b.cost = 1.0;
+        app.ingest(vec![a, b]);
+
+        app.rows(now);
+        assert_eq!(app.cached_rows().len(), 1);
+        assert_eq!(app.cached_rows()[0].model, "mixed");
+
+        app.selected = 0;
+        app.toggle_expand();
+        let kinds: Vec<(RowKind, u8)> = app.rows(now).iter().map(|r| (r.kind, r.depth)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (RowKind::Project, 0),
+                (RowKind::Model, 1),
+                (RowKind::Model, 1)
+            ]
+        );
+        // Cost-descending: model-a first.
+        assert_eq!(app.cached_rows()[1].label, "model-a");
+
+        // Expand model-a: only its session (s-alpha) appears, at depth 2.
+        app.selected = 1;
+        app.toggle_expand();
+        let rows = app.rows(now);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[2].kind, RowKind::Session);
+        assert_eq!(rows[2].depth, 2);
+        assert!(rows[2].label.starts_with("s-alpha"));
+    }
+
+    #[test]
+    fn hide_and_unhide_projects() {
+        let now = fixed_now();
+        let ts = now - time::Duration::seconds(10);
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.ingest(vec![
+            make_entry("/proj-one", "s1", ts, 100),
+            make_entry("/proj-two", "s2", ts, 200),
+        ]);
+
+        app.rows(now);
+        app.selected = 0;
+        app.hide_selected();
+        assert_eq!(app.hidden_count(), 1);
+        let labels: Vec<String> = app.rows(now).iter().map(|r| r.label.clone()).collect();
+        assert_eq!(labels.len(), 1);
+
+        app.unhide_all();
+        assert_eq!(app.hidden_count(), 0);
+        assert_eq!(app.rows(now).len(), 2);
+    }
+
+    #[test]
+    fn by_model_view_groups_across_projects() {
+        // Two projects sharing one model: model view shows a single top row
+        // with both sessions counted; expanding lists both projects.
+        let now = fixed_now();
+        let ts = now - time::Duration::seconds(10);
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.view_mode = ViewMode::ByModel;
+        app.ingest(vec![
+            make_entry("/proj-one", "s1", ts, 100),
+            make_entry("/proj-two", "s2", ts, 200),
+        ]);
+
+        let rows = app.rows(now);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, RowKind::Model);
+        assert_eq!(rows[0].session_count, 2);
+
+        app.selected = 0;
+        app.toggle_expand();
+        let rows = app.rows(now);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[1..].iter().all(|r| r.kind == RowKind::Project));
+        assert!(rows[1..].iter().all(|r| r.depth == 1));
+    }
+
+    #[test]
+    fn project_view_honors_sort_settings() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        let mut alpha = make_entry("/alpha", "s1", now - time::Duration::seconds(20), 400);
+        alpha.cost = 1.0;
+        let mut beta = make_entry("/beta", "s2", now - time::Duration::seconds(10), 100);
+        beta.cost = 9.0;
+        app.ingest(vec![alpha, beta]);
+
+        let labels = |app: &mut AppState| -> Vec<String> {
+            app.invalidate();
+            app.rows(now).iter().map(|r| r.label.clone()).collect()
+        };
+
+        app.sort_column = SortColumn::CostRate;
+        assert_eq!(labels(&mut app), ["/beta", "/alpha"], "cost desc");
+        app.sort_column = SortColumn::InputRate;
+        assert_eq!(labels(&mut app), ["/alpha", "/beta"], "input desc");
+        app.sort_column = SortColumn::Project;
+        assert_eq!(labels(&mut app), ["/alpha", "/beta"], "by name");
+        app.sort_column = SortColumn::LastActivity;
+        assert_eq!(labels(&mut app), ["/beta", "/alpha"], "recent first");
+        app.sort_ascending = true;
+        assert_eq!(labels(&mut app), ["/alpha", "/beta"], "reversed");
+    }
+
+    #[test]
+    fn histogram_selection_resolves_short_session_ids() {
+        // Session labels are 12-char short ids; Selection::matches must
+        // resolve them back to the full id by prefix.
+        let now = fixed_now();
+        let ts = now - time::Duration::seconds(10);
+        let long_a = "aaaaaaaaaaaa-1111-2222-3333".to_string();
+        let long_b = "bbbbbbbbbbbb-4444-5555-6666".to_string();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.ingest(vec![
+            make_entry("/proj", &long_a, ts, 400),
+            make_entry("/proj", &long_b, ts, 800),
+        ]);
+
+        app.rows(now);
+        app.selected = 0;
+        app.toggle_expand();
+        let sess_idx = app
+            .rows(now)
+            .iter()
+            .position(|r| r.kind == RowKind::Session && r.label.starts_with("aaaa"))
+            .expect("session row for long_a");
+        assert_eq!(app.cached_rows()[sess_idx].label.len(), 12);
+        app.selected = sess_idx;
+
+        let sel = app.selected_filter().unwrap();
+        let buckets = app.histogram(now, 8, Some(&sel));
+        let total: u64 = buckets.iter().map(|b| b.input_tokens).sum();
+        assert_eq!(total, 400, "only long_a's tokens may appear");
+    }
+
     // --- Selection filter tests ---
 
     #[test]
