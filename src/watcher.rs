@@ -113,13 +113,23 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
         return entries;
     }
 
-    let mut line = String::new();
+    // Advance the offset only past newline-terminated lines. A trailing line
+    // without '\n' is a partial write still in flight: consuming it now would
+    // split one record into two unparseable fragments and silently lose it.
+    let mut consumed = state.byte_offset;
+    let mut buf: Vec<u8> = Vec::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break,
-            Ok(_) => {
-                if let Some(entry) = parse_line(line.trim(), &state.identity) {
+            Ok(n) => {
+                if buf.last() != Some(&b'\n') {
+                    break; // partial line — re-read complete on the next event
+                }
+                consumed += n as u64;
+                if let Ok(line) = std::str::from_utf8(&buf)
+                    && let Some(entry) = parse_line(line.trim(), &state.identity)
+                {
                     entries.push(entry);
                 }
             }
@@ -127,7 +137,7 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
         }
     }
 
-    state.byte_offset = reader.stream_position().unwrap_or(file_len);
+    state.byte_offset = consumed;
     entries
 }
 
@@ -169,20 +179,35 @@ fn tail_read_file(
             return (entries, file_len);
         }
 
+        // Track the position after the last newline-terminated line so the
+        // returned offset never lands mid-line (the file may be growing under
+        // us, and `file_len` was sampled before the read).
+        let mut consumed = start_offset;
+
         // If we didn't start at the beginning, skip the first partial line
         if start_offset > 0 {
-            let mut discard = String::new();
-            let _ = reader.read_line(&mut discard);
+            let mut discard: Vec<u8> = Vec::new();
+            match reader.read_until(b'\n', &mut discard) {
+                Ok(n) if discard.last() == Some(&b'\n') => consumed += n as u64,
+                _ => {} // no newline in the whole tail — stay at start_offset
+            }
         }
 
-        let mut line = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         let mut oldest_seen: Option<OffsetDateTime> = None;
 
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
                 Ok(0) => break,
-                Ok(_) => {
+                Ok(n) => {
+                    if buf.last() != Some(&b'\n') {
+                        break; // in-flight partial line — the watcher re-reads it
+                    }
+                    consumed += n as u64;
+                    let Ok(line) = std::str::from_utf8(&buf) else {
+                        continue;
+                    };
                     if let Some(entry) = parse_line(line.trim(), identity) {
                         if oldest_seen.is_none_or(|t| entry.timestamp < t) {
                             oldest_seen = Some(entry.timestamp);
@@ -198,12 +223,10 @@ fn tail_read_file(
 
         let covers_window = start_offset == 0 || oldest_seen.is_some_and(|t| t < cutoff);
         if covers_window || tail_bytes >= MAX_TAIL_BYTES {
-            break;
+            return (entries, consumed);
         }
         tail_bytes *= 2;
     }
-
-    (entries, file_len)
 }
 
 /// Scan all existing JSONL files for entries within the retention window,
@@ -427,6 +450,87 @@ mod parse_tests {
         assert!(e.has_speed);
     }
 
+    // --- incremental reads and partial lines ---
+
+    fn identity_for(path: &std::path::Path) -> FileIdentity {
+        FileIdentity {
+            path: path.to_path_buf(),
+            project: "/test".to_string(),
+            session_id: "sess".to_string(),
+            subagent_id: None,
+        }
+    }
+
+    #[test]
+    fn partial_trailing_line_not_consumed() {
+        // A line written in two chunks (no trailing newline yet) must not be
+        // consumed: the offset stays put so the next read sees it complete.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let now = OffsetDateTime::now_utc();
+        let full = format!("{}\n", usage_line(now, "m1", 50));
+
+        std::fs::write(&path, &full.as_bytes()[..full.len() / 2]).unwrap();
+        let mut state = FileState {
+            identity: identity_for(&path),
+            byte_offset: 0,
+        };
+        let entries = read_incremental(&mut state);
+        assert!(entries.is_empty());
+        assert_eq!(state.byte_offset, 0, "partial line must stay unconsumed");
+
+        std::fs::write(&path, &full).unwrap();
+        let entries = read_incremental(&mut state);
+        assert_eq!(entries.len(), 1, "completed line must be parsed");
+        assert_eq!(state.byte_offset, full.len() as u64);
+    }
+
+    #[test]
+    fn partial_line_cut_mid_codepoint_not_consumed() {
+        // Same, but the chunk boundary lands inside a multi-byte UTF-8
+        // character (read_until is byte-based, so this must not error out
+        // or skip the line).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let line = r#"{"timestamp":"2026-06-09T10:00:00Z","pad":"ééééé","requestId":"r1","message":{"usage":{"input_tokens":10,"output_tokens":1},"model":"claude-haiku-4-5","id":"m1"}}"#;
+        let full = format!("{line}\n");
+        let cut = full.find('é').unwrap() + 1; // mid-codepoint
+        assert!(!full.is_char_boundary(cut));
+
+        std::fs::write(&path, &full.as_bytes()[..cut]).unwrap();
+        let mut state = FileState {
+            identity: identity_for(&path),
+            byte_offset: 0,
+        };
+        assert!(read_incremental(&mut state).is_empty());
+        assert_eq!(state.byte_offset, 0);
+
+        std::fs::write(&path, &full).unwrap();
+        assert_eq!(read_incremental(&mut state).len(), 1);
+        assert_eq!(state.byte_offset, full.len() as u64);
+    }
+
+    #[test]
+    fn complete_invalid_utf8_line_skipped_without_stalling() {
+        // A newline-terminated line of non-UTF-8 garbage must be skipped
+        // (offset advances past it) so valid lines after it are reached.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let now = OffsetDateTime::now_utc();
+        let valid = format!("{}\n", usage_line(now, "m1", 0));
+        let mut content: Vec<u8> = vec![0xff, 0xfe, b'"', b'i', b'n', b'p', b'u', b't', b'\n'];
+        content.extend_from_slice(valid.as_bytes());
+        std::fs::write(&path, &content).unwrap();
+
+        let mut state = FileState {
+            identity: identity_for(&path),
+            byte_offset: 0,
+        };
+        let entries = read_incremental(&mut state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(state.byte_offset, content.len() as u64);
+    }
+
     // --- tail_read_file window coverage ---
 
     fn usage_line(ts: OffsetDateTime, msg_id: &str, pad: usize) -> String {
@@ -498,5 +602,34 @@ mod parse_tests {
         let (entries, _) = tail_read_file(&path, &identity(), cutoff);
         assert_eq!(entries.len(), 10);
         assert!(entries.iter().all(|e| e.timestamp >= cutoff));
+    }
+
+    #[test]
+    fn tail_read_offset_stops_before_partial_tail_line() {
+        // A file being actively written at scan time can end mid-line; the
+        // returned offset must point after the last complete line so the
+        // watcher re-reads the partial one once it's finished.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.jsonl");
+        let now = OffsetDateTime::now_utc();
+        let cutoff = now - time::Duration::hours(24);
+
+        let complete = format!(
+            "{}\n{}\n",
+            usage_line(now, "m1", 0),
+            usage_line(now, "m2", 0)
+        );
+        let partial = usage_line(now, "m3", 0);
+        let mut content = complete.clone();
+        content.push_str(&partial[..partial.len() / 2]);
+        std::fs::write(&path, &content).unwrap();
+
+        let (entries, offset) = tail_read_file(&path, &identity_for(&path), cutoff);
+        assert_eq!(entries.len(), 2, "only complete lines are parsed");
+        assert_eq!(
+            offset,
+            complete.len() as u64,
+            "offset must stop at the last newline"
+        );
     }
 }
