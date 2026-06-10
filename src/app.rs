@@ -598,7 +598,7 @@ impl AppState {
     /// Emit rows in project-first view.
     fn emit_project_view(&self, projects: &[ProjectAgg], minutes: f64, rows: &mut Vec<DisplayRow>) {
         let mut sorted: Vec<&ProjectAgg> = projects.iter().collect();
-        self.sort_project_refs(&mut sorted, minutes);
+        self.sort_project_refs(&mut sorted);
 
         for proj in sorted {
             if self.hidden.contains(&proj.name) {
@@ -693,7 +693,26 @@ impl AppState {
         }
 
         let mut sorted: Vec<GlobalModelAgg> = global_models.into_values().collect();
-        sorted.sort_by(|a, b| f64_cmp(b.cost, a.cost));
+        sorted.sort_by(|a, b| {
+            sort_cmp(
+                self.sort_column,
+                self.sort_ascending,
+                (
+                    a.cost,
+                    a.input_tokens,
+                    a.output_tokens,
+                    a.last_activity,
+                    &a.model_name,
+                ),
+                (
+                    b.cost,
+                    b.input_tokens,
+                    b.output_tokens,
+                    b.last_activity,
+                    &b.model_name,
+                ),
+            )
+        });
 
         for gm in &sorted {
             let model_key = format!("\0{}", gm.model_name);
@@ -846,19 +865,48 @@ impl AppState {
         }
     }
 
-    fn sort_project_refs(&self, projects: &mut [&ProjectAgg], minutes: f64) {
-        let asc = self.sort_ascending;
+    fn sort_project_refs(&self, projects: &mut [&ProjectAgg]) {
         projects.sort_by(|a, b| {
-            let cmp = match self.sort_column {
-                SortColumn::CostRate => f64_cmp(b.cost / minutes, a.cost / minutes),
-                SortColumn::InputRate => f64_cmp(b.input_tokens as f64, a.input_tokens as f64),
-                SortColumn::OutputRate => f64_cmp(b.output_tokens as f64, a.output_tokens as f64),
-                SortColumn::LastActivity => b.last_activity.cmp(&a.last_activity),
-                SortColumn::Project => a.name.cmp(&b.name),
-            };
-            if asc { cmp.reverse() } else { cmp }
+            sort_cmp(
+                self.sort_column,
+                self.sort_ascending,
+                (
+                    a.cost,
+                    a.input_tokens,
+                    a.output_tokens,
+                    a.last_activity,
+                    &a.name,
+                ),
+                (
+                    b.cost,
+                    b.input_tokens,
+                    b.output_tokens,
+                    b.last_activity,
+                    &b.name,
+                ),
+            )
         });
     }
+}
+
+/// Compare two (cost, input, output, last_activity, label) rows per the
+/// active sort settings. Numeric columns default to descending, the label
+/// column to ascending; `asc` flips the direction. Rates sort identically
+/// to their raw totals (same divisor), so totals are compared directly.
+fn sort_cmp(
+    col: SortColumn,
+    asc: bool,
+    a: (f64, u64, u64, Option<OffsetDateTime>, &str),
+    b: (f64, u64, u64, Option<OffsetDateTime>, &str),
+) -> std::cmp::Ordering {
+    let cmp = match col {
+        SortColumn::CostRate => f64_cmp(b.0, a.0),
+        SortColumn::InputRate => b.1.cmp(&a.1),
+        SortColumn::OutputRate => b.2.cmp(&a.2),
+        SortColumn::LastActivity => b.3.cmp(&a.3),
+        SortColumn::Project => a.4.cmp(b.4),
+    };
+    if asc { cmp.reverse() } else { cmp }
 }
 
 // --- Dedup merge (mirrors ccusage's loader) ---
@@ -1953,6 +2001,43 @@ mod tests {
         let sel = app.selected_filter().unwrap();
         assert_eq!(sel.project, "/proj-two");
         assert_eq!(sel.session_id.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn model_view_honors_sort_settings() {
+        // Model view used to hardcode cost-descending while the footer
+        // still advertised the s/S sort keys.
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.view_mode = ViewMode::ByModel;
+        let mut alpha = make_entry("/p1", "s1", now - time::Duration::seconds(20), 100);
+        alpha.model = "alpha".to_string();
+        alpha.cost = 1.0;
+        let mut beta = make_entry("/p2", "s2", now - time::Duration::seconds(10), 200);
+        beta.model = "beta".to_string();
+        beta.cost = 9.0;
+        app.ingest(vec![alpha, beta]);
+
+        let top_labels = |app: &mut AppState| -> Vec<String> {
+            app.invalidate();
+            app.rows(now)
+                .iter()
+                .filter(|r| r.depth == 0)
+                .map(|r| r.label.clone())
+                .collect()
+        };
+
+        app.sort_column = SortColumn::CostRate;
+        assert_eq!(top_labels(&mut app), ["beta", "alpha"], "cost desc");
+        app.sort_ascending = true;
+        assert_eq!(top_labels(&mut app), ["alpha", "beta"], "cost asc");
+
+        app.sort_ascending = false;
+        app.sort_column = SortColumn::Project;
+        assert_eq!(top_labels(&mut app), ["alpha", "beta"], "by label");
+
+        app.sort_column = SortColumn::LastActivity;
+        assert_eq!(top_labels(&mut app), ["beta", "alpha"], "most recent first");
     }
 
     #[test]
