@@ -8,10 +8,10 @@ description = "Live terminal monitor for Claude Code token usage"
 [dependencies]
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 clap = { version = "4", features = ["derive"] }
-crossterm = "0.28"
+crossterm = "0.29"
 dirs = "6"
 notify = "8"
-ratatui = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
