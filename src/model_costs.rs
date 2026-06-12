@@ -124,9 +124,16 @@ fn parse_or_die(json: &str, origin: Origin) -> HashMap<String, ModelPricing> {
 
 fn fetch_litellm() -> Result<String, Box<dyn std::error::Error>> {
     let body = ureq::get(LITELLM_URL)
-        .timeout(FETCH_TIMEOUT)
+        .config()
+        .timeout_global(Some(FETCH_TIMEOUT))
+        .build()
         .call()?
-        .into_string()?;
+        .body_mut()
+        .with_config()
+        // The LiteLLM database is ~3MB and growing; the default body cap
+        // is 10MB, so set an explicit generous ceiling.
+        .limit(64 * 1024 * 1024)
+        .read_to_string()?;
     Ok(body)
 }
 
