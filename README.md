@@ -121,7 +121,8 @@ cctop -w 24h
 
 The top half shows a **table** with one row per project:
 
-- **PROJECT** -- decoded filesystem path of the project
+- **PROJECT** -- decoded filesystem path of the project (Kiro crew's per-task
+  `kirocrew-workspace/<task>` directories are grouped under the workspace)
 - **TREND** -- sparkline of token activity over the window (oldest left, newest right)
 - **SESS** -- number of active sessions in the window
 - **MODEL** -- the model consuming the most cost in the window

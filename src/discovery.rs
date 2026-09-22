@@ -162,7 +162,22 @@ pub fn classify_file(path: &Path) -> FileIdentity {
     }
 }
 
+/// Kiro crew runs every task (`subagent_<id>`, `cron_<id>`, `_bg`) in its own
+/// subdirectory of this workspace, so each would otherwise show up as a
+/// separate project. Matched in encoded form, where `/` and `_` are `-`.
+const KIROCREW_WORKSPACE: &str = "-kirocrew-workspace";
+
+/// Fold per-task workspace subdirectories into their workspace root.
+fn fold_task_workspace(encoded: &str) -> &str {
+    let needle = format!("{KIROCREW_WORKSPACE}-");
+    match encoded.find(&needle) {
+        Some(i) => &encoded[..i + KIROCREW_WORKSPACE.len()],
+        None => encoded,
+    }
+}
+
 fn decode_project_name(encoded: &str) -> String {
+    let encoded = fold_task_workspace(encoded);
     let stripped = encoded.strip_prefix('-').unwrap_or(encoded);
     format!("/{}", stripped.replace('-', "/"))
 }
@@ -197,5 +212,30 @@ mod tests {
         assert_eq!(id.project, "/home/olof/cctop");
         assert_eq!(id.session_id, "a513fce4");
         assert_eq!(id.subagent_id.as_deref(), Some("agent-abc"));
+    }
+
+    #[test]
+    fn kirocrew_task_dirs_fold_into_workspace() {
+        let root = "/Users/o/workplace/kirocrew/workspace";
+        for dir in [
+            "-Users-o-workplace-kirocrew-workspace-subagent-00ab7992",
+            "-Users-o-workplace-kirocrew-workspace-cron-5973ab8b",
+            "-Users-o-workplace-kirocrew-workspace--bg",
+            "-Users-o-workplace-kirocrew-workspace",
+        ] {
+            let path = PathBuf::from(format!("/Users/o/.claude/projects/{dir}/s1.jsonl"));
+            let id = classify_file(&path);
+            assert_eq!(id.project, root, "{dir}");
+            assert_eq!(id.session_id, "s1");
+        }
+    }
+
+    #[test]
+    fn kirocrew_fold_needs_a_component_boundary() {
+        let path = PathBuf::from("/h/.claude/projects/-home-u-mykirocrew-workspace-notes/s1.jsonl");
+        assert_eq!(
+            extract_project_from_path(&path),
+            "/home/u/mykirocrew/workspace/notes"
+        );
     }
 }
