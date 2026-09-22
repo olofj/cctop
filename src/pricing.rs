@@ -156,10 +156,21 @@ pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
         ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)).with_fast(2.0),
     );
 
-    // Fable 5: not in LiteLLM yet; rates from Anthropic's published pricing.
+    // Opus 5: no fast mode.
+    ins(
+        "claude-opus-5",
+        ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)),
+    );
+
+    // Fable 5 / 5.1: rates from Anthropic's published pricing; note
+    // Fable 5.1's cheaper cache reads.
     ins(
         "claude-fable-5",
         ModelPricing::new(mtok(10.0), mtok(50.0), mtok(12.50), mtok(1.0)),
+    );
+    ins(
+        "claude-fable-5-1",
+        ModelPricing::new(mtok(10.0), mtok(50.0), mtok(12.50), mtok(0.25)),
     );
 
     m
@@ -197,8 +208,7 @@ pub(crate) fn fast_multiplier_for(normalized_key: &str) -> f64 {
 static LOOKUP_MEMO: OnceLock<Mutex<FxHashMap<String, Option<&'static ModelPricing>>>> =
     OnceLock::new();
 
-/// Look up pricing for a model: exact match first, then a boundary-aware
-/// fuzzy match over all keys with the longest matching key winning.
+/// Look up pricing for a model (see `lookup_in`), memoized.
 pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
     let memo = LOOKUP_MEMO.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Ok(guard) = memo.lock()
@@ -213,6 +223,10 @@ pub fn lookup_pricing(model: &str) -> Option<&'static ModelPricing> {
     resolved
 }
 
+/// Resolve a model id against a pricing map, most to least specific:
+/// exact key, lowercased key, normalized key (`.`/`@` -> `-`, so
+/// `claude-opus-4.8` finds `claude-opus-4-8` without any scanning), then a
+/// boundary-aware fuzzy scan where the longest matching key wins.
 pub(crate) fn lookup_in<'a>(
     map: &'a HashMap<String, ModelPricing>,
     model: &str,
@@ -227,6 +241,9 @@ pub(crate) fn lookup_in<'a>(
     }
 
     let normalized_model = normalize(&model_lower);
+    if let Some(p) = map.get(normalized_model.as_str()) {
+        return Some(p);
+    }
 
     let mut best: Option<(&str, &ModelPricing)> = None;
     for (key, pricing) in map.iter() {
@@ -254,13 +271,34 @@ pub(crate) fn normalize(value: &str) -> String {
     value.replace(['.', '@'], "-")
 }
 
+/// Canonical keys are first-party (`claude-*`) and Bedrock base
+/// (`anthropic.claude-*`) spellings, both billed at list price. LiteLLM also
+/// carries decorated keys for regional uplifts (`us.anthropic.*`,
+/// `us-gov.anthropic.*`), resellers and batch tiers (`openrouter/...:batch`,
+/// `bedrock/us-gov-east-1/...`), each with its own price.
+fn is_canonical_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("claude-") || key.starts_with("anthropic.claude-")
+}
+
+/// Fuzzy matching may strip decoration the model id carries, but must never
+/// add decoration it lacks. A key contained in the model id (e.g. key
+/// `us.anthropic.claude-opus-5` in model `us.anthropic.claude-opus-5-v1:0`)
+/// only drops what the id itself says, so any key qualifies. A model id
+/// contained in a longer key, however, would inherit that key's extra parts,
+/// so only canonical keys qualify: otherwise the longest-key rule resolves a
+/// plain id to its most decorated variant (e.g. an OpenRouter half-price
+/// `:batch` entry or a gov-cloud uplift) instead of the list price.
 fn pricing_key_matches(key: &str, model_lower: &str, normalized_model: &str) -> bool {
-    if contains_pricing_key(model_lower, key) || contains_pricing_key(key, model_lower) {
+    let normalized_key = normalize(key);
+    let key_in_model = contains_pricing_key(model_lower, key)
+        || contains_pricing_key(normalized_model, &normalized_key);
+    if key_in_model {
         return true;
     }
-    let normalized_key = normalize(key);
-    contains_pricing_key(normalized_model, &normalized_key)
-        || contains_pricing_key(&normalized_key, normalized_model)
+    is_canonical_key(key)
+        && (contains_pricing_key(key, model_lower)
+            || contains_pricing_key(&normalized_key, normalized_model))
 }
 
 /// Boundary-aware containment: `needle` must appear in `haystack` with
@@ -327,7 +365,13 @@ pub fn calculate_cost(record: &RawRecord) -> f64 {
     if let Some(cost) = record.cost_usd {
         return cost;
     }
-    let model = match record.message.model.as_deref() {
+    calculate_usage_cost(record.message.model.as_deref(), &record.message.usage)
+}
+
+/// Calculate cost from tokens for a bare (model, usage) pair — used for the
+/// main record and for advisor iterations, which never carry a costUSD.
+pub fn calculate_usage_cost(model: Option<&str>, usage: &Usage) -> f64 {
+    let model = match model {
         Some(m) => m,
         None => return 0.0,
     };
@@ -338,7 +382,7 @@ pub fn calculate_cost(record: &RawRecord) -> f64 {
             return 0.0;
         }
     };
-    cost_from_usage(&record.message.usage, pricing)
+    cost_from_usage(usage, pricing)
 }
 
 /// Pure cost computation for a usage block against a pricing entry.
@@ -795,5 +839,109 @@ mod tests {
         );
         let map = merged_pricing(dynamic);
         assert_eq!(lookup_in(&map, "claude-fable-5").unwrap().input, mtok(10.0));
+    }
+
+    #[test]
+    fn opus_5_and_fable_51_rates() {
+        let p = lookup_pricing("claude-opus-5").unwrap();
+        assert_eq!(p.input, mtok(5.0));
+        assert_eq!(p.cache_read, mtok(0.50));
+        assert_eq!(p.fast_multiplier, 1.0);
+
+        let p = lookup_pricing("claude-fable-5-1").unwrap();
+        assert_eq!(p.input, mtok(10.0));
+        assert_eq!(p.output, mtok(50.0));
+        assert_eq!(
+            p.cache_read,
+            mtok(0.25),
+            "Fable 5.1 cache reads are cheaper"
+        );
+
+        // The version-suffix rule must keep fable-5-1 off the fable-5 entry.
+        assert_eq!(
+            lookup_pricing("claude-fable-5").unwrap().cache_read,
+            mtok(1.0)
+        );
+    }
+
+    // ---- Decorated dynamic keys must not capture plain model ids ----
+
+    /// Builtin table plus LiteLLM-shaped decorated entries, each deliberately
+    /// priced differently from list price so a wrong resolution is visible.
+    fn map_with_decorated_keys() -> HashMap<String, ModelPricing> {
+        let litellm = crate::model_costs::parse_litellm_json(
+            r#"{
+            "openrouter/anthropic/claude-opus-4.7:batch":
+                {"input_cost_per_token": 2.5e-06, "output_cost_per_token": 1.25e-05},
+            "bedrock/us-gov-east-1/anthropic.claude-opus-4-8":
+                {"input_cost_per_token": 6e-06, "output_cost_per_token": 3e-05},
+            "us-gov.anthropic.claude-fable-5-1":
+                {"input_cost_per_token": 1.2e-05, "output_cost_per_token": 6e-05},
+            "us.anthropic.claude-opus-4-7":
+                {"input_cost_per_token": 5.5e-06, "output_cost_per_token": 2.75e-05},
+            "us.anthropic.claude-opus-5":
+                {"input_cost_per_token": 5.5e-06, "output_cost_per_token": 2.75e-05},
+            "openrouter/anthropic/claude-opus-4-7-20991231:batch":
+                {"input_cost_per_token": 2.5e-06, "output_cost_per_token": 1.25e-05}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(litellm.len(), 6, "fixture parses");
+        merged_pricing(litellm)
+    }
+
+    #[test]
+    fn dotted_ids_resolve_to_list_price_not_decorated_variants() {
+        let map = map_with_decorated_keys();
+        // Each of these previously resolved to the longest (most decorated)
+        // key containing the normalized id.
+        assert_eq!(lookup_in(&map, "claude-opus-4.7").unwrap().input, mtok(5.0));
+        assert_eq!(lookup_in(&map, "claude-opus-4.8").unwrap().input, mtok(5.0));
+        assert_eq!(
+            lookup_in(&map, "claude-fable-5.1").unwrap().input,
+            mtok(10.0)
+        );
+    }
+
+    #[test]
+    fn plain_id_without_exact_key_never_gains_decoration() {
+        // No key equals this id (normalized or not), so the fuzzy scan runs.
+        // The canonical claude-opus-4-7 is contained in it via the date-alias
+        // rule; a longer decorated key contains the id itself and must lose.
+        let map = map_with_decorated_keys();
+        let p = lookup_in(&map, "claude-opus-4-7-20991231").unwrap();
+        assert_eq!(p.input, mtok(5.0), "matched a decorated :batch key");
+    }
+
+    #[test]
+    fn decorated_ids_keep_their_own_prices() {
+        let map = map_with_decorated_keys();
+        // Exact decorated key: the regional uplift applies.
+        assert_eq!(
+            lookup_in(&map, "us.anthropic.claude-opus-4-7")
+                .unwrap()
+                .input,
+            mtok(5.5)
+        );
+        // Bedrock-style id with no exact key: the decorated key is contained
+        // in the id itself, so matching it adds nothing the id lacks.
+        assert_eq!(
+            lookup_in(&map, "us.anthropic.claude-opus-5-v1:0")
+                .unwrap()
+                .input,
+            mtok(5.5)
+        );
+    }
+
+    #[test]
+    fn normalized_exact_match_precedes_fuzzy_scan() {
+        // A longer canonical key that also matches the normalized id (via the
+        // date-alias rule) must not beat the exact normalized spelling.
+        let mut map = builtin_pricing();
+        let mut dated = map["claude-opus-4-8"].clone();
+        dated.input = mtok(99.0);
+        map.insert("claude-opus-4-8-20260101-v1:0".to_string(), dated);
+        assert_eq!(lookup_in(&map, "claude-opus-4.8").unwrap().input, mtok(5.0));
+        assert_eq!(lookup_in(&map, "CLAUDE-OPUS-4.8").unwrap().input, mtok(5.0));
     }
 }

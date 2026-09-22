@@ -20,15 +20,16 @@ think top(1) for your Claude Code spend.
   (steel blue = input, teal = output, gray = cache)
 - **Configurable sliding window**: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
 - **Wall-clock-quantized bucketing** so the chart slides smoothly instead of jittering
-- **Fast startup**: skips files untouched for 24h and tail-reads the rest,
+- **Fast startup**: skips files untouched for 26h and tail-reads the rest,
   growing each tail just enough to cover the window — sessions with hundreds
   of megabytes of history don't slow it down
 - **Live pricing**: Claude rates from LiteLLM's pricing database, cached for
   24h under `~/.cache/cctop/`, merged on top of a built-in fallback table;
   tiered >200k pricing, 5m/1h cache-write rates, and fast-mode multipliers
 - **Accurate counting**: upstream-ccusage dedup semantics — streamed partial
-  writes, sidechain replays, and progress-wrapped subagent records all
-  collapse to the most complete copy
+  writes, sidechain replays, lines copied into resumed/forked sessions, and
+  progress-wrapped subagent records all collapse to the most complete copy;
+  advisor-tool calls are counted under the advisor's own model
 - **Keyboard-driven**: vim-style navigation (hjkl), sort cycling, collapse all
 
 ## Prerequisites
@@ -160,7 +161,9 @@ on startup, then uses inotify to watch for new data in real-time. Each JSONL
 line containing `input_tokens` is parsed (including `type:"progress"` wrapper
 lines from subagent transcripts), costed, and merged into a deduplicated
 time-windowed in-memory store; a more complete duplicate arriving later
-replaces its sibling so rates correct themselves retroactively. The TUI
+replaces its sibling so rates correct themselves retroactively. The store
+keeps 2h beyond the 24h display window purely as dedup partners, so a replay
+whose original is just over a day old still merges instead of counting. The TUI
 re-renders on each tick (3s by default) and immediately after input.
 
 Pricing comes from LiteLLM's community pricing database: a copy is cached

@@ -98,7 +98,7 @@ fn main() -> io::Result<()> {
     );
 
     // Initial scan + start file watcher
-    let (initial_entries, watcher_rx) = watcher::start(claude_paths, types::MAX_RETENTION_SECS);
+    let (initial_entries, watcher_rx) = watcher::start(claude_paths, types::DEDUP_RETENTION_SECS);
 
     // Build initial app state
     let mut app = AppState::new(window, cli.project);

@@ -82,6 +82,7 @@ struct UsageLine {
     cache_write: u64,
     cache_read: u64,
     sidechain: bool,
+    session_id: Option<String>,
 }
 
 impl UsageLine {
@@ -96,6 +97,7 @@ impl UsageLine {
             cache_write: 0,
             cache_read: 0,
             sidechain: false,
+            session_id: None,
         }
     }
 
@@ -119,6 +121,12 @@ impl UsageLine {
 
     fn sidechain(mut self) -> Self {
         self.sidechain = true;
+        self
+    }
+
+    /// Set the line's top-level sessionId field (the effective dedup session).
+    fn session(mut self, session_id: &str) -> Self {
+        self.session_id = Some(session_id.to_string());
         self
     }
 
@@ -157,12 +165,18 @@ impl UsageLine {
         } else {
             ""
         };
+        let session = self
+            .session_id
+            .as_ref()
+            .map(|s| format!(r#","sessionId":"{s}""#))
+            .unwrap_or_default();
         format!(
-            r#"{{"type":"assistant","timestamp":"{}","message":{}{}{}}}"#,
+            r#"{{"type":"assistant","timestamp":"{}","message":{}{}{}{}}}"#,
             rfc3339(self.timestamp),
             self.message_json(),
             self.request_json(),
-            side
+            side,
+            session
         )
     }
 
@@ -308,9 +322,11 @@ fn sidechain_replay_across_files_counted_once() {
 #[test]
 fn sidechain_replay_counted_once_when_replay_scans_first() {
     // Same merge, opposite arrival order: the sidechain copy lives in a
-    // session file that sorts before the parent's.
+    // file that sorts before the parent's. The sidechain fallback is
+    // session-scoped, so the replay carries the parent's sessionId.
     let fx = Fixture::new();
     let now = OffsetDateTime::now_utc();
+    let parent_session = "bbbb2222-0000-0000-0000-000000000000";
 
     append_line(
         &fx.session_file("-test-proj", "aaaa1111-0000-0000-0000-000000000000"),
@@ -319,10 +335,11 @@ fn sidechain_replay_counted_once_when_replay_scans_first() {
             .tokens(100, 50)
             .cache(0, 50_000)
             .sidechain()
+            .session(parent_session)
             .build(),
     );
     append_line(
-        &fx.session_file("-test-proj", "bbbb2222-0000-0000-0000-000000000000"),
+        &fx.session_file("-test-proj", parent_session),
         &UsageLine::new(now, "claude-haiku-4-5")
             .ids(Some("m1"), Some("r1"))
             .tokens(100, 50)
@@ -592,4 +609,92 @@ fn subagent_files_attributed_to_parent_session() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].session_id, session);
     assert_eq!(entries[0].subagent_id.as_deref(), Some("agent-abc123"));
+}
+
+#[test]
+fn sidechain_replay_in_unrelated_session_counted_separately() {
+    // Session-scoped fallback: without a shared effective session, a
+    // sidechain line reusing a message id is distinct usage.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+
+    append_line(
+        &fx.session_file("-test-proj", "aaaa1111-0000-0000-0000-000000000000"),
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r2"))
+            .tokens(100, 50)
+            .sidechain()
+            .build(),
+    );
+    append_line(
+        &fx.session_file("-test-proj", "bbbb2222-0000-0000-0000-000000000000"),
+        &UsageLine::new(now, "claude-haiku-4-5")
+            .ids(Some("m1"), Some("r1"))
+            .tokens(100, 50)
+            .build(),
+    );
+
+    let (_, total) = ingest_and_total(fx.scan(), now);
+    assert_eq!(total.input_tokens, 200);
+}
+
+#[test]
+fn copied_request_in_resumed_session_counted_once() {
+    // Claude Code copies identical response lines into a resumed session's
+    // transcript; with a requestId the dedup key is global.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let line = UsageLine::new(now, "claude-haiku-4-5")
+        .ids(Some("m1"), Some("r1"))
+        .tokens(100, 50);
+
+    append_line(
+        &fx.session_file("-test-proj", "aaaa1111-0000-0000-0000-000000000000"),
+        &line.build(),
+    );
+    append_line(
+        &fx.session_file("-test-proj", "bbbb2222-0000-0000-0000-000000000000"),
+        &line.build(),
+    );
+
+    let (_, total) = ingest_and_total(fx.scan(), now);
+    assert_eq!(total.input_tokens, 100);
+}
+
+#[test]
+fn advisor_iterations_expand_and_dedup() {
+    // One assistant line with an advisor iteration yields two entries (the
+    // advisor billed under its own model); a replayed copy of the line
+    // collapses both.
+    let fx = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let line = format!(
+        concat!(
+            r#"{{"type":"assistant","timestamp":"{}","requestId":"r1","#,
+            r#""message":{{"id":"m1","model":"claude-fable-5","usage":{{"#,
+            r#""input_tokens":100,"output_tokens":50,"iterations":["#,
+            r#"{{"type":"message","input_tokens":100,"output_tokens":50}},"#,
+            r#"{{"type":"advisor_message","model":"claude-haiku-4-5","#,
+            r#""input_tokens":2000,"output_tokens":300}}]}}}}}}"#
+        ),
+        rfc3339(now)
+    );
+    let file = fx.session_file("-test-proj", "11111111-2222-3333-4444-555555555555");
+    append_line(&file, &line);
+    append_line(&file, &line);
+
+    let entries = fx.scan();
+    assert_eq!(entries.len(), 4, "two lines x (main + advisor)");
+    let advisor = entries
+        .iter()
+        .find(|e| e.model == "claude-haiku-4-5")
+        .unwrap();
+    assert_eq!(advisor.message_id.as_deref(), Some("m1:advisor:0"));
+    // Builtin haiku-4-5 rates: $1/MTok in, $5/MTok out.
+    let expected = 2000.0 * 1e-6 + 300.0 * 5e-6;
+    assert!((advisor.cost - expected).abs() < 1e-12);
+
+    let (_, total) = ingest_and_total(entries, now);
+    assert_eq!(total.input_tokens, 2100, "main + advisor, replay collapsed");
+    assert_eq!(total.output_tokens, 350);
 }

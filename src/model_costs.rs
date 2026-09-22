@@ -176,7 +176,7 @@ fn write_cache_atomically(path: &Path, contents: &str) {
 /// data is Claude Code JSONL, and restricting the key space keeps the fuzzy
 /// lookup from ever resolving a Claude model id against an unrelated
 /// provider's entry (LiteLLM's us./eu. regional aliases bill +10%).
-fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPricing>, String> {
+pub(crate) fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPricing>, String> {
     let raw: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
     let entries = raw

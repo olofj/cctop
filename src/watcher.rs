@@ -15,8 +15,11 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::discovery::{classify_file, get_projects_dirs, glob_usage_files};
-use crate::pricing::calculate_cost;
-use crate::types::{FileIdentity, ProgressRecord, RawRecord, TokenEntry, WatchEvent};
+use crate::pricing::{calculate_cost, calculate_usage_cost};
+use crate::types::{
+    FileIdentity, ProgressRecord, RawRecord, TokenEntry, Usage, WatchEvent,
+    advisor_usages_from_line,
+};
 
 /// Placeholder model on records Claude Code injects for non-API events
 /// (e.g. "no response requested" notices); they carry no real usage.
@@ -56,8 +59,13 @@ const INITIAL_TAIL_BYTES: u64 = 512 * 1024;
 /// everything from there on.
 const MAX_TAIL_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Parse a single JSONL line into a TokenEntry if it contains token usage data.
-fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
+/// Parse a single JSONL line into its usage entries: the record itself,
+/// followed by one entry per advisor iteration (if any).
+fn parse_line(line: &str, identity: &FileIdentity) -> Vec<TokenEntry> {
+    parse_record(line, identity).unwrap_or_default()
+}
+
+fn parse_record(line: &str, identity: &FileIdentity) -> Option<Vec<TokenEntry>> {
     // Fast pre-filter: skip lines that can't contain token usage
     if !line.contains("\"input_tokens\"") {
         return None;
@@ -79,33 +87,69 @@ fn parse_line(line: &str, identity: &FileIdentity) -> Option<TokenEntry> {
 
     let cost = calculate_cost(&record);
 
+    // Effective session for dedup: sessionId field, else path-derived.
+    let dedup_session = record
+        .session_id
+        .take()
+        .unwrap_or_else(|| identity.session_id.clone());
+
     let model = record
         .message
         .model
         .take()
         .unwrap_or_else(|| "unknown".to_string());
-    let display_model = if record.message.usage.speed.as_deref() == Some("fast") {
-        format!("{}-fast", model)
+
+    let make_entry =
+        |model: String, usage: &Usage, cost: f64, message_id: Option<String>| TokenEntry {
+            timestamp,
+            project: identity.project.clone(),
+            session_id: identity.session_id.clone(),
+            subagent_id: identity.subagent_id.clone(),
+            model: display_model(model, usage),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_write_tokens: usage.cache_creation_token_count(),
+            cache_read_tokens: usage.cache_read_input_tokens,
+            cost,
+            message_id,
+            request_id: record.request_id.clone(),
+            is_sidechain: record.is_sidechain,
+            has_speed: usage.speed.is_some(),
+            dedup_session: dedup_session.clone(),
+        };
+
+    let mut entries = vec![make_entry(
+        model,
+        &record.message.usage,
+        cost,
+        record.message.id.clone(),
+    )];
+
+    // Advisor iterations become distinct entries under the advisor's own
+    // model. They carry no costUSD, so they are always priced from tokens.
+    // Their dedup key is {messageId}:advisor:{index}: replayed lines still
+    // collapse, while advisor entries never collide with their parent.
+    // (Parsed from the raw line; progress wrappers never match.)
+    for (index, (advisor_model, usage)) in advisor_usages_from_line(line).into_iter().enumerate() {
+        let cost = calculate_usage_cost(Some(&advisor_model), &usage);
+        let message_id = record
+            .message
+            .id
+            .as_ref()
+            .map(|id| format!("{id}:advisor:{index}"));
+        entries.push(make_entry(advisor_model, &usage, cost, message_id));
+    }
+
+    Some(entries)
+}
+
+/// Fast-mode usage is shown as its own `<model>-fast` row.
+fn display_model(model: String, usage: &Usage) -> String {
+    if usage.speed.as_deref() == Some("fast") {
+        format!("{model}-fast")
     } else {
         model
-    };
-
-    Some(TokenEntry {
-        timestamp,
-        project: identity.project.clone(),
-        session_id: identity.session_id.clone(),
-        subagent_id: identity.subagent_id.clone(),
-        model: display_model,
-        input_tokens: record.message.usage.input_tokens,
-        output_tokens: record.message.usage.output_tokens,
-        cache_write_tokens: record.message.usage.cache_creation_token_count(),
-        cache_read_tokens: record.message.usage.cache_read_input_tokens,
-        cost,
-        message_id: record.message.id,
-        request_id: record.request_id,
-        is_sidechain: record.is_sidechain,
-        has_speed: record.message.usage.speed.is_some(),
-    })
+    }
 }
 
 /// Read new lines from a file starting at the given byte offset.
@@ -153,10 +197,8 @@ fn read_incremental(state: &mut FileState) -> Vec<TokenEntry> {
                     break; // partial line — re-read complete on the next event
                 }
                 consumed += n as u64;
-                if let Ok(line) = std::str::from_utf8(&buf)
-                    && let Some(entry) = parse_line(line.trim(), &state.identity)
-                {
-                    entries.push(entry);
+                if let Ok(line) = std::str::from_utf8(&buf) {
+                    entries.extend(parse_line(line.trim(), &state.identity));
                 }
             }
             Err(_) => break,
@@ -237,7 +279,7 @@ fn tail_read_file(
                     let Ok(line) = std::str::from_utf8(&buf) else {
                         continue;
                     };
-                    if let Some(entry) = parse_line(line.trim(), identity) {
+                    for entry in parse_line(line.trim(), identity) {
                         if first_parsed.is_none() {
                             first_parsed = Some(entry.timestamp);
                         }
@@ -421,13 +463,20 @@ mod parse_tests {
         }
     }
 
+    /// Parse a line expected to yield exactly one entry.
+    fn parse_one(line: &str) -> TokenEntry {
+        let mut entries = parse_line(line, &identity());
+        assert_eq!(entries.len(), 1, "expected one entry");
+        entries.remove(0)
+    }
+
     #[test]
     fn parses_plain_assistant_line() {
         let line = r#"{"timestamp":"2026-06-09T10:00:00Z","requestId":"r1",
             "message":{"usage":{"input_tokens":10,"output_tokens":20},
                        "model":"claude-haiku-4-5","id":"m1"}}"#
             .replace('\n', "");
-        let e = parse_line(&line, &identity()).unwrap();
+        let e = parse_one(&line);
         assert_eq!(e.input_tokens, 10);
         assert_eq!(e.message_id.as_deref(), Some("m1"));
         assert_eq!(e.request_id.as_deref(), Some("r1"));
@@ -457,7 +506,7 @@ mod parse_tests {
             r#""uuid":"c3d4e5f6-7777-8888-9999-000011112222","#,
             r#""timestamp":"2026-06-09T10:00:00.123Z"}"#
         );
-        let e = parse_line(line, &identity()).unwrap();
+        let e = parse_one(line);
         assert_eq!(e.input_tokens, 4);
         assert_eq!(e.output_tokens, 268);
         assert_eq!(e.cache_write_tokens, 24205);
@@ -479,7 +528,7 @@ mod parse_tests {
             "message":{"usage":{"input_tokens":100,"output_tokens":50},
                        "model":"cctop-test-unpriceable-model-xq","id":"m1"}}"#
             .replace('\n', "");
-        let e = parse_line(&line, &identity()).unwrap();
+        let e = parse_one(&line);
         assert_eq!(e.cost, 0.42);
         assert!(
             !crate::pricing::unknown_models()
@@ -496,7 +545,7 @@ mod parse_tests {
                 "message":{"usage":{"input_tokens":5,"output_tokens":7},
                            "model":"claude-haiku-4-5","id":"msg_n"}}}}"#
             .replace('\n', "");
-        let e = parse_line(&line, &identity()).unwrap();
+        let e = parse_one(&line);
         assert_eq!(e.input_tokens, 5);
         assert_eq!(e.output_tokens, 7);
         assert_eq!(e.message_id.as_deref(), Some("msg_n"));
@@ -506,17 +555,72 @@ mod parse_tests {
     }
 
     #[test]
+    fn dedup_session_from_session_id_field_else_path() {
+        let line = r#"{"timestamp":"2026-06-09T10:00:00Z","sessionId":"from-field",
+            "message":{"usage":{"input_tokens":1,"output_tokens":1},"model":"m","id":"m1"}}"#
+            .replace('\n', "");
+        let e = parse_one(&line);
+        assert_eq!(e.dedup_session, "from-field");
+        assert_eq!(e.session_id, "sess", "display session stays path-derived");
+
+        let line = line.replace(r#""sessionId":"from-field","#, "");
+        assert_eq!(parse_one(&line).dedup_session, "sess");
+    }
+
+    #[test]
+    fn progress_wrapper_session_id_comes_from_outer_line() {
+        let line = r#"{"type":"progress","timestamp":"2026-06-09T10:00:00Z","sessionId":"outer",
+            "data":{"message":{"timestamp":"2026-06-09T10:00:01Z","requestId":"req_n",
+                "message":{"usage":{"input_tokens":5,"output_tokens":7},
+                           "model":"claude-haiku-4-5","id":"msg_n"}}}}"#
+            .replace('\n', "");
+        assert_eq!(parse_one(&line).dedup_session, "outer");
+    }
+
+    #[test]
+    fn advisor_iterations_filtered_and_flattened() {
+        // "message" iterations fold into the top-level usage; advisor
+        // entries without a (non-empty) model are skipped.
+        let line = concat!(
+            r#"{"timestamp":"2026-07-20T10:00:00Z","requestId":"req1","message":{"#,
+            r#""model":"claude-fable-5","id":"msg1","usage":{"input_tokens":100,"#,
+            r#""output_tokens":50,"iterations":["#,
+            r#"{"type":"message","input_tokens":100,"output_tokens":50},"#,
+            r#"{"type":"advisor_message","model":"claude-sonnet-4-6","input_tokens":2000,"#,
+            r#""output_tokens":300,"cache_creation_input_tokens":40,"#,
+            r#""cache_read_input_tokens":5000,"cache_creation":{"#,
+            r#""ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":30}},"#,
+            r#"{"type":"advisor_message","input_tokens":1,"output_tokens":1},"#,
+            r#"{"type":"advisor_message","model":"","input_tokens":1,"output_tokens":1}"#,
+            r#"]}}}"#
+        );
+        let entries = parse_line(line, &identity());
+        assert_eq!(entries.len(), 2);
+        let (main, advisor) = (&entries[0], &entries[1]);
+        assert_eq!(main.model, "claude-fable-5");
+        assert_eq!(main.input_tokens, 100);
+        assert_eq!(advisor.model, "claude-sonnet-4-6");
+        assert_eq!(advisor.input_tokens, 2000);
+        assert_eq!(advisor.cache_read_tokens, 5000);
+        // 5m/1h breakdown wins over the flat field.
+        assert_eq!(advisor.cache_write_tokens, 40);
+        assert_eq!(advisor.message_id.as_deref(), Some("msg1:advisor:0"));
+        assert_eq!(advisor.request_id.as_deref(), Some("req1"));
+        assert!(advisor.cost > 0.0, "advisor priced under its own model");
+    }
+
+    #[test]
     fn skips_synthetic_records_plain_and_wrapped() {
         let plain = r#"{"timestamp":"2026-06-09T10:00:00Z",
             "message":{"usage":{"input_tokens":0,"output_tokens":0},"model":"<synthetic>"}}"#
             .replace('\n', "");
-        assert!(parse_line(&plain, &identity()).is_none());
+        assert!(parse_line(&plain, &identity()).is_empty());
 
         let wrapped = r#"{"type":"progress","timestamp":"2026-06-09T10:00:00Z",
             "data":{"message":{"message":{"usage":{"input_tokens":0,"output_tokens":0},
                 "model":"<synthetic>"}}}}"#
             .replace('\n', "");
-        assert!(parse_line(&wrapped, &identity()).is_none());
+        assert!(parse_line(&wrapped, &identity()).is_empty());
     }
 
     #[test]
@@ -525,7 +629,7 @@ mod parse_tests {
             "data":{"message":{"message":{"usage":{"input_tokens":1,"output_tokens":1},
                 "model":"m"}}}}"#
             .replace('\n', "");
-        assert!(parse_line(&line, &identity()).is_none());
+        assert!(parse_line(&line, &identity()).is_empty());
     }
 
     #[test]
@@ -536,7 +640,7 @@ mod parse_tests {
                 "cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}},
                 "model":"claude-haiku-4-5","id":"m1"}}"#
             .replace('\n', "");
-        let e = parse_line(&line, &identity()).unwrap();
+        let e = parse_one(&line);
         // Breakdown sum, not the flat field.
         assert_eq!(e.cache_write_tokens, 300);
     }
@@ -547,7 +651,7 @@ mod parse_tests {
             "message":{"usage":{"input_tokens":1,"output_tokens":1,"speed":"fast"},
                 "model":"claude-opus-4-6","id":"m1"}}"#
             .replace('\n', "");
-        let e = parse_line(&line, &identity()).unwrap();
+        let e = parse_one(&line);
         assert_eq!(e.model, "claude-opus-4-6-fast");
         assert!(e.has_speed);
     }

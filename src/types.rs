@@ -18,6 +18,8 @@ pub struct RawRecord {
     pub request_id: Option<String>,
     #[serde(rename = "isSidechain")]
     pub is_sidechain: Option<bool>,
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +62,64 @@ impl Usage {
     }
 }
 
+/// Minimal envelope for extracting advisor iterations from a raw line.
+/// Parsed separately from RawRecord (only when the line mentions
+/// "advisor_message") so the main Usage schema stays unchanged.
+#[derive(Debug, Deserialize)]
+struct AdvisorEnvelope {
+    message: AdvisorEnvelopeMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvisorEnvelopeMessage {
+    usage: AdvisorEnvelopeUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvisorEnvelopeUsage {
+    #[serde(default)]
+    iterations: Vec<UsageIteration>,
+}
+
+/// One entry of usage.iterations. Token fields are flattened into the
+/// iteration object itself, not nested under a "usage" key.
+#[derive(Debug, Deserialize)]
+struct UsageIteration {
+    #[serde(rename = "type")]
+    kind: String,
+    model: Option<String>,
+    #[serde(flatten)]
+    usage: Usage,
+}
+
+/// Extract advisor-model usage from a raw JSONL line: iterations with
+/// type "advisor_message" and a non-empty model. The advisor tool's
+/// secondary model calls are recorded there, priced under the advisor's
+/// own model; the main model's top-level usage already excludes them.
+/// Other iteration types (e.g. "message") are folded into the top-level
+/// usage and must not be double counted.
+pub fn advisor_usages_from_line(line: &str) -> Vec<(String, Usage)> {
+    if !line.contains("\"advisor_message\"") {
+        return Vec::new();
+    }
+    let Ok(envelope) = serde_json::from_str::<AdvisorEnvelope>(line) else {
+        return Vec::new();
+    };
+    envelope
+        .message
+        .usage
+        .iterations
+        .into_iter()
+        .filter(|iteration| iteration.kind == "advisor_message")
+        .filter_map(|iteration| {
+            iteration
+                .model
+                .filter(|model| !model.is_empty())
+                .map(|model| (model, iteration.usage))
+        })
+        .collect()
+}
+
 /// A `type:"progress"` wrapper line. Subagent transcripts (e.g. auto-compact
 /// agents) replay assistant messages nested under `data.message.message`,
 /// and for some messages the nested copy is the only complete usage record.
@@ -68,6 +128,8 @@ pub struct ProgressRecord {
     #[serde(rename = "type")]
     pub kind: String,
     pub timestamp: Option<String>,
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
     pub data: ProgressData,
 }
 
@@ -104,6 +166,8 @@ impl ProgressRecord {
             // outer wrapper line — the envelope usually omits it, making
             // nested copies non-sidechain for dedup tier purposes.
             is_sidechain: envelope.is_sidechain,
+            // The session id, by contrast, lives on the wrapper line.
+            session_id: self.session_id,
         })
     }
 }
@@ -128,6 +192,9 @@ pub struct TokenEntry {
     pub request_id: Option<String>,
     pub is_sidechain: Option<bool>,
     pub has_speed: bool,
+    /// Effective session for dedup scoping: the line's sessionId field,
+    /// falling back to the path-derived session.
+    pub dedup_session: String,
 }
 
 impl TokenEntry {
@@ -165,8 +232,19 @@ pub enum WindowSize {
     W24h,
 }
 
-/// The largest window we support — also the data retention period.
+/// The largest window we support — also the display retention period.
 pub const MAX_RETENTION_SECS: i64 = 24 * 3600;
+
+/// How far past the display retention entries are kept (and read at
+/// startup) purely as dedup partners. Dedup must see both copies of a
+/// duplicate: if a copy just outside the retention window is dropped first,
+/// its in-window twin (e.g. a sidechain replay whose parent is older) is
+/// counted although the merged result says it doesn't exist. Duplicate
+/// copies in real transcripts land well under an hour apart.
+pub const DEDUP_MARGIN_SECS: i64 = 2 * 3600;
+
+/// Total storage retention: display retention plus the dedup margin.
+pub const DEDUP_RETENTION_SECS: i64 = MAX_RETENTION_SECS + DEDUP_MARGIN_SECS;
 
 impl WindowSize {
     /// (window, seconds, label) in declaration order — `self as usize`
