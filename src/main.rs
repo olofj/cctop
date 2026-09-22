@@ -20,7 +20,7 @@ use cctop::{model_costs, pricing, ui, watcher};
 #[derive(Parser)]
 #[command(name = "cctop", about = "Live Claude Code token monitor", version)]
 struct Cli {
-    /// Initial time window (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h)
+    /// Initial time window (1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h, 2d-7d)
     #[arg(short, long, default_value = "5m")]
     window: String,
 
@@ -58,7 +58,9 @@ fn main() -> io::Result<()> {
         Some(w) => w,
         None => {
             eprintln!("error: invalid --window value '{}'", cli.window);
-            eprintln!("       valid: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h");
+            eprintln!(
+                "       valid: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h, 2d, 3d, 4d, 5d, 6d, 7d"
+            );
             std::process::exit(2);
         }
     };

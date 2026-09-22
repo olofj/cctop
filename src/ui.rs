@@ -507,12 +507,19 @@ fn format_duration_short(secs: f64) -> String {
         } else {
             format!("{:.1}m", m)
         }
-    } else {
+    } else if secs < 86400.0 {
         let h = secs / 3600.0;
         if h.fract() < 0.05 {
             format!("{:.0}h", h)
         } else {
             format!("{:.1}h", h)
+        }
+    } else {
+        let d = secs / 86400.0;
+        if d.fract() < 0.05 {
+            format!("{:.0}d", d)
+        } else {
+            format!("{:.1}d", d)
         }
     }
 }

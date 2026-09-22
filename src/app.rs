@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHasher};
 use time::OffsetDateTime;
 
 use crate::types::{
-    BarColorMode, DEDUP_RETENTION_SECS, DisplayRow, GraphMetric, HistBucket, MAX_RETENTION_SECS,
+    BarColorMode, DEDUP_RETENTION_SECS, DisplayRow, GraphMetric, HistBucket, MIN_ROW_HORIZON_SECS,
     RowKind, SPARKLINE_BUCKETS, Selection, SortColumn, TokenEntry, ViewMode, WindowSize,
 };
 
@@ -435,8 +435,11 @@ impl AppState {
 
         let mut project_data: BTreeMap<String, ProjectAgg> = BTreeMap::new();
 
-        // Entries past the display retention are dedup partners only.
-        let retention_cutoff = now - time::Duration::seconds(MAX_RETENTION_SECS);
+        // Rows cover the window, but at least MIN_ROW_HORIZON_SECS; older
+        // entries (including the dedup-margin partners past the display
+        // retention) are never listed.
+        let row_horizon = (self.window.as_secs() as i64).max(MIN_ROW_HORIZON_SECS);
+        let retention_cutoff = now - time::Duration::seconds(row_horizon);
 
         for entry in self
             .entries
@@ -1262,6 +1265,7 @@ pub fn format_tokens(tokens: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MAX_RETENTION_SECS;
     use time::macros::datetime;
 
     fn make_entry(project: &str, session: &str, ts: OffsetDateTime, input: u64) -> TokenEntry {
@@ -2383,18 +2387,19 @@ mod tests {
 
     #[test]
     fn replay_of_parent_just_outside_display_retention_not_counted() {
-        // The parent is older than 24h (outside every window) and its
+        // The parent is past the display retention (outside every window)
+        // and its
         // in-window sidechain replay must merge into it, not resurrect the
         // replay's huge cache read (ccusage c4717523: window after dedup).
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W24h, None);
+        let mut app = AppState::new(WindowSize::W7d, None);
         let parent = dedup_entry_in(
             "m1",
             Some("r1"),
             None,
             100,
             "s1",
-            now - time::Duration::minutes(24 * 60 + 30),
+            now - retention() - time::Duration::minutes(30),
         );
         let mut replay = dedup_entry_in(
             "m1",
@@ -2402,7 +2407,7 @@ mod tests {
             Some(true),
             100,
             "s1",
-            now - time::Duration::minutes(24 * 60 - 30),
+            now - retention() + time::Duration::minutes(30),
         );
         replay.cache_read_tokens = 50_000;
         replay.cost = 1.0;
@@ -2432,19 +2437,41 @@ mod tests {
 
     #[test]
     fn prune_keeps_dedup_margin_entries_but_hides_them() {
-        // Past the 24h display retention but inside the dedup margin: kept
+        // Past the display retention but inside the dedup margin: kept
         // for dedup, never shown.
         let now = fixed_now();
-        let mut app = AppState::new(WindowSize::W24h, None);
+        let mut app = AppState::new(WindowSize::W7d, None);
         app.ingest(vec![make_entry(
             "/old",
             "s1",
-            now - time::Duration::hours(25),
+            now - retention() - time::Duration::hours(1),
             100,
         )]);
         app.prune(now);
         assert_eq!(app.entries.len(), 1);
         assert!(app.rows(now).is_empty(), "margin entries must not display");
+    }
+
+    #[test]
+    fn rows_cover_at_least_a_day_and_at_most_the_window() {
+        let now = fixed_now();
+        let mut app = AppState::new(WindowSize::W5m, None);
+        app.ingest(vec![
+            make_entry("/today", "s1", now - time::Duration::hours(20), 100),
+            make_entry("/lastweek", "s2", now - time::Duration::days(3), 100),
+        ]);
+        let names = |app: &mut AppState| -> Vec<String> {
+            app.rows(now).iter().map(|r| r.label.clone()).collect()
+        };
+        // Short window: the day's sessions are listed, older ones are not.
+        assert_eq!(names(&mut app).len(), 1);
+        app.window = WindowSize::W4d;
+        app.invalidate();
+        assert_eq!(names(&mut app).len(), 2);
+    }
+
+    fn retention() -> time::Duration {
+        time::Duration::seconds(MAX_RETENTION_SECS)
     }
 
     fn past_dedup_retention() -> time::Duration {

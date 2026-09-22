@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use cctop::app::AppState;
-use cctop::types::{MAX_RETENTION_SECS, TokenEntry, WindowSize};
+use cctop::types::{DEDUP_RETENTION_SECS, TokenEntry, WindowSize};
 use cctop::watcher;
 
 /// A fake Claude config dir with a `projects/` tree the watcher can scan.
@@ -52,7 +52,7 @@ impl Fixture {
 
     /// Run the watcher's initial scan over the fixture tree.
     fn scan(&self) -> Vec<TokenEntry> {
-        let (entries, _rx) = watcher::start(vec![self.base.clone()], MAX_RETENTION_SECS);
+        let (entries, _rx) = watcher::start(vec![self.base.clone()], DEDUP_RETENTION_SECS);
         entries
     }
 }
@@ -502,7 +502,7 @@ fn live_append_and_new_file_detected() {
             .build(),
     );
 
-    let (initial, rx) = watcher::start(vec![fx.base.clone()], MAX_RETENTION_SECS);
+    let (initial, rx) = watcher::start(vec![fx.base.clone()], DEDUP_RETENTION_SECS);
     assert_eq!(initial.len(), 1);
 
     // Live append to the known file, plus a brand-new session file.
@@ -556,17 +556,22 @@ fn stale_mtime_file_skipped_then_tracked_live() {
 
     append_line(
         &file,
-        &UsageLine::new(now - time::Duration::hours(48), "claude-haiku-4-5")
-            .ids(Some("m-ancient"), Some("r0"))
-            .tokens(1000, 1000)
-            .build(),
+        &UsageLine::new(
+            now - time::Duration::seconds(DEDUP_RETENTION_SECS) - time::Duration::days(1),
+            "claude-haiku-4-5",
+        )
+        .ids(Some("m-ancient"), Some("r0"))
+        .tokens(1000, 1000)
+        .build(),
     );
     let f = fs::OpenOptions::new().write(true).open(&file).unwrap();
-    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(25 * 3600))
-        .unwrap();
+    f.set_modified(
+        std::time::SystemTime::now() - Duration::from_secs(DEDUP_RETENTION_SECS as u64 + 3600),
+    )
+    .unwrap();
     drop(f);
 
-    let (initial, rx) = watcher::start(vec![fx.base.clone()], MAX_RETENTION_SECS);
+    let (initial, rx) = watcher::start(vec![fx.base.clone()], DEDUP_RETENTION_SECS);
     assert!(initial.is_empty(), "stale-mtime file must not be read");
 
     append_line(

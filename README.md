@@ -18,9 +18,9 @@ think top(1) for your Claude Code spend.
 - **Per-row sparkline** showing each project's activity trend over the window
 - **Stacked bar histogram** on the lower half with color-coded token types
   (steel blue = input, teal = output, gray = cache)
-- **Configurable sliding window**: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
+- **Configurable sliding window**: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h, 2d–7d
 - **Wall-clock-quantized bucketing** so the chart slides smoothly instead of jittering
-- **Fast startup**: skips files untouched for 26h and tail-reads the rest,
+- **Fast startup**: skips files untouched for 7d (+2h) and tail-reads the rest,
   growing each tail just enough to cover the window — sessions with hundreds
   of megabytes of history don't slow it down
 - **Live pricing**: Claude rates from LiteLLM's pricing database, cached for
@@ -86,7 +86,8 @@ cctop [OPTIONS]
 
 Options:
   -w, --window <WINDOW>    Initial time window [default: 5m]
-                           Values: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h
+                           Values: 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 24h,
+                           2d, 3d, 4d, 5d, 6d, 7d
                            (anything else is an error)
   -p, --project <PROJECT>  Filter to projects matching this substring
                            (hyphenated names match too: Claude encodes '/'
@@ -162,8 +163,10 @@ line containing `input_tokens` is parsed (including `type:"progress"` wrapper
 lines from subagent transcripts), costed, and merged into a deduplicated
 time-windowed in-memory store; a more complete duplicate arriving later
 replaces its sibling so rates correct themselves retroactively. The store
-keeps 2h beyond the 24h display window purely as dedup partners, so a replay
-whose original is just over a day old still merges instead of counting. The TUI
+keeps 2h beyond the 7d display retention purely as dedup partners, so a
+replay whose original is just past the retention still merges instead of
+counting. Rows list sessions active within the window or the last 24h,
+whichever is longer. The TUI
 re-renders on each tick (3s by default) and immediately after input.
 
 Pricing comes from LiteLLM's community pricing database: a copy is cached

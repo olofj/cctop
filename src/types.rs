@@ -230,10 +230,21 @@ pub enum WindowSize {
     W4h,
     W8h,
     W24h,
+    W2d,
+    W3d,
+    W4d,
+    W5d,
+    W6d,
+    W7d,
 }
 
-/// The largest window we support — also the display retention period.
-pub const MAX_RETENTION_SECS: i64 = 24 * 3600;
+/// The largest window we support (7d) — also the display retention period.
+pub const MAX_RETENTION_SECS: i64 = 7 * 24 * 3600;
+
+/// Rows (with their "last activity") are listed for anything active within
+/// the display window or this long, whichever is larger, so short windows
+/// still show the day's sessions without listing the whole week.
+pub const MIN_ROW_HORIZON_SECS: i64 = 24 * 3600;
 
 /// How far past the display retention entries are kept (and read at
 /// startup) purely as dedup partners. Dedup must see both copies of a
@@ -249,7 +260,7 @@ pub const DEDUP_RETENTION_SECS: i64 = MAX_RETENTION_SECS + DEDUP_MARGIN_SECS;
 impl WindowSize {
     /// (window, seconds, label) in declaration order — `self as usize`
     /// indexes into this, and next/prev step through it.
-    const ALL: [(WindowSize, u64, &'static str); 9] = [
+    const ALL: [(WindowSize, u64, &'static str); 15] = [
         (Self::W1m, 60, "1m"),
         (Self::W5m, 300, "5m"),
         (Self::W15m, 900, "15m"),
@@ -259,6 +270,12 @@ impl WindowSize {
         (Self::W4h, 14400, "4h"),
         (Self::W8h, 28800, "8h"),
         (Self::W24h, 86400, "24h"),
+        (Self::W2d, 2 * 86400, "2d"),
+        (Self::W3d, 3 * 86400, "3d"),
+        (Self::W4d, 4 * 86400, "4d"),
+        (Self::W5d, 5 * 86400, "5d"),
+        (Self::W6d, 6 * 86400, "6d"),
+        (Self::W7d, 7 * 86400, "7d"),
     ];
 
     pub fn as_secs(self) -> u64 {
@@ -277,7 +294,7 @@ impl WindowSize {
         Self::ALL[self as usize].2
     }
 
-    /// One step larger (saturating at 24h).
+    /// One step larger (saturating at 7d).
     pub fn next(self) -> Self {
         Self::ALL[(self as usize + 1).min(Self::ALL.len() - 1)].0
     }
@@ -302,6 +319,8 @@ impl WindowSize {
             "60m" | "60" => Some(Self::W1h),
             "120m" => Some(Self::W2h),
             "240m" => Some(Self::W4h),
+            "1d" => Some(Self::W24h),
+            "1w" => Some(Self::W7d),
             _ => None,
         }
     }
@@ -507,8 +526,11 @@ mod tests {
     fn window_next_prev_walk_the_table() {
         assert_eq!(WindowSize::W1m.prev(), WindowSize::W1m);
         assert_eq!(WindowSize::W1m.next(), WindowSize::W5m);
-        assert_eq!(WindowSize::W24h.next(), WindowSize::W24h);
+        assert_eq!(WindowSize::W24h.next(), WindowSize::W2d);
         assert_eq!(WindowSize::W24h.prev(), WindowSize::W8h);
+        assert_eq!(WindowSize::W2d.prev(), WindowSize::W24h);
+        assert_eq!(WindowSize::W6d.next(), WindowSize::W7d);
+        assert_eq!(WindowSize::W7d.next(), WindowSize::W7d);
     }
 
     #[test]
@@ -517,6 +539,11 @@ mod tests {
         assert_eq!(WindowSize::parse("5"), Some(WindowSize::W5m));
         assert_eq!(WindowSize::parse("60m"), Some(WindowSize::W1h));
         assert_eq!(WindowSize::parse("24h"), Some(WindowSize::W24h));
+        assert_eq!(WindowSize::parse("1d"), Some(WindowSize::W24h));
+        assert_eq!(WindowSize::parse("3d"), Some(WindowSize::W3d));
+        assert_eq!(WindowSize::parse("7d"), Some(WindowSize::W7d));
+        assert_eq!(WindowSize::parse("1w"), Some(WindowSize::W7d));
+        assert_eq!(WindowSize::parse("8d"), None);
     }
 
     #[test]

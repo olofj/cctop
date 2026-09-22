@@ -54,7 +54,7 @@ fn file_signature(meta: &std::fs::Metadata) -> (u64, u64) {
 /// Initial tail-read size (512 KB).
 const INITIAL_TAIL_BYTES: u64 = 512 * 1024;
 
-/// Upper bound for the growing tail read (64 MB). A file whose last 24h of
+/// Upper bound for the growing tail read (64 MB). A file whose last 7d of
 /// records exceed this is read partially; the live watcher picks up
 /// everything from there on.
 const MAX_TAIL_BYTES: u64 = 64 * 1024 * 1024;
