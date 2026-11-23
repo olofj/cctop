@@ -20,12 +20,21 @@ pub struct ModelPricing {
     /// cache_creation_input_token_cost_above_1hr). When absent, 1h writes
     /// bill at 2x the base input rate.
     pub cache_write_1h: Option<f64>,
+    // Long-context tier ("above_200k" for historical reasons; the
+    // threshold is per row). When a request's context (input + cache
+    // reads + cache writes) exceeds `long_context_threshold`, EVERY token
+    // of the request bills at these rates (Anthropic's whole-request
+    // long-context pricing).
     pub input_above_200k: Option<f64>,
     pub output_above_200k: Option<f64>,
     pub cache_write_above_200k: Option<f64>,
     pub cache_read_above_200k: Option<f64>,
+    pub long_context_threshold: u64,
     pub fast_multiplier: f64,
 }
+
+/// The long-context threshold when a source names none.
+pub const DEFAULT_LONG_CONTEXT_THRESHOLD: u64 = 200_000;
 
 impl ModelPricing {
     pub(crate) const fn new(input: f64, output: f64, cache_write: f64, cache_read: f64) -> Self {
@@ -39,22 +48,9 @@ impl ModelPricing {
             output_above_200k: None,
             cache_write_above_200k: None,
             cache_read_above_200k: None,
+            long_context_threshold: DEFAULT_LONG_CONTEXT_THRESHOLD,
             fast_multiplier: 1.0,
         }
-    }
-
-    const fn with_tiered(
-        mut self,
-        input: f64,
-        output: f64,
-        cache_write: f64,
-        cache_read: f64,
-    ) -> Self {
-        self.input_above_200k = Some(input);
-        self.output_above_200k = Some(output);
-        self.cache_write_above_200k = Some(cache_write);
-        self.cache_read_above_200k = Some(cache_read);
-        self
     }
 
     const fn with_fast(mut self, multiplier: f64) -> Self {
@@ -67,11 +63,13 @@ impl ModelPricing {
 static ACTIVE_PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
 
 /// The builtin floor with a dynamic table merged on top, so builtin-only
-/// models (e.g. fable-5, absent from LiteLLM) keep their rates when a
-/// download succeeds.
+/// models (e.g. fable-5-2, absent from LiteLLM) keep their rates when a
+/// download succeeds. The curated long-context tiers apply last, to rows
+/// from either source.
 fn merged_pricing(dynamic: HashMap<String, ModelPricing>) -> HashMap<String, ModelPricing> {
     let mut map = builtin_pricing();
     map.extend(dynamic);
+    apply_curated_long_context(&mut map);
     map
 }
 
@@ -124,15 +122,10 @@ pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
         ModelPricing::new(mtok(1.0), mtok(5.0), mtok(1.25), mtok(0.10)),
     );
 
-    // Sonnet 4.5: >200k tokens bill at a long-context premium.
+    // Sonnet 4.5 (long-context tier: CURATED_LONG_CONTEXT).
     ins(
         "claude-sonnet-4-5",
-        ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30)).with_tiered(
-            mtok(6.0),
-            mtok(22.50),
-            mtok(7.50),
-            mtok(0.60),
-        ),
+        ModelPricing::new(mtok(3.0), mtok(15.0), mtok(3.75), mtok(0.30)),
     );
 
     // Sonnet 4.6: 1M context at standard rates, no long-context premium.
@@ -190,7 +183,114 @@ pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
         ModelPricing::new(mtok(8.0), mtok(40.0), mtok(10.0), mtok(0.20)).with_fast(2.0),
     );
 
+    apply_curated_long_context(&mut m);
     m
+}
+
+/// Anthropic's published long-context billing, applied to every row billed
+/// at the model's list rates whichever source it came from (upstream
+/// 6a90a6f5 / fb1745b4): LiteLLM's first-party Sonnet 4.5 rows carry no
+/// tier, nothing carries Haiku 5.5's 100K tier in the 200K fields, and 4.6+
+/// rows may carry a stale 200K tier. A host billing its own rates keeps its
+/// own tier.
+///
+/// Opus/Sonnet 4.6 paid a premium during the 1M beta (before 2026-03-13);
+/// ccusage models that, but it is far outside cctop's 7-day window.
+struct CuratedLongContext {
+    family: &'static str,
+    list_input: f64,
+    list_output: f64,
+    /// (threshold, [input, output, 5m cache write, cache read]) $/MTok,
+    /// or None for "standard rates across the whole window".
+    tier: Option<(u64, [f64; 4])>,
+}
+
+const SONNET_4_TIER: Option<(u64, [f64; 4])> = Some((200_000, [6.0, 22.50, 7.50, 0.60]));
+
+const CURATED_LONG_CONTEXT: &[CuratedLongContext] = &[
+    // Sonnet 4 / 4.5: every token of a request over 200K at $6/$22.50.
+    CuratedLongContext {
+        family: "claude-sonnet-4",
+        list_input: 3.0,
+        list_output: 15.0,
+        tier: SONNET_4_TIER,
+    },
+    CuratedLongContext {
+        family: "claude-sonnet-4-5",
+        list_input: 3.0,
+        list_output: 15.0,
+        tier: SONNET_4_TIER,
+    },
+    // Haiku 5.5: every token of a request over 100K at $0.50/$2.50.
+    CuratedLongContext {
+        family: "claude-haiku-5-5",
+        list_input: 0.10,
+        list_output: 0.50,
+        tier: Some((100_000, [0.50, 2.50, 0.625, 0.05])),
+    },
+    // 4.6 and later (other than Haiku 5.5): the full 1M window at standard
+    // rates.
+    CuratedLongContext {
+        family: "claude-sonnet-4-6",
+        list_input: 3.0,
+        list_output: 15.0,
+        tier: None,
+    },
+    CuratedLongContext {
+        family: "claude-opus-4-6",
+        list_input: 5.0,
+        list_output: 25.0,
+        tier: None,
+    },
+    CuratedLongContext {
+        family: "claude-opus-4-7",
+        list_input: 5.0,
+        list_output: 25.0,
+        tier: None,
+    },
+    CuratedLongContext {
+        family: "claude-opus-4-8",
+        list_input: 5.0,
+        list_output: 25.0,
+        tier: None,
+    },
+];
+
+/// Apply CURATED_LONG_CONTEXT to every row of `map` whose key names a
+/// curated family and whose base rates are that family's list rates.
+fn apply_curated_long_context(map: &mut HashMap<String, ModelPricing>) {
+    let same = |a: f64, b: f64| (a - b).abs() <= b * 1e-9;
+    for (key, pricing) in map.iter_mut() {
+        let normalized = normalize(&key.to_ascii_lowercase());
+        // The longest family named by the key decides (sonnet-4-5 over 4).
+        let Some(curated) = CURATED_LONG_CONTEXT
+            .iter()
+            .filter(|c| contains_pricing_key(&normalized, c.family))
+            .max_by_key(|c| c.family.len())
+        else {
+            continue;
+        };
+        if !same(pricing.input, mtok(curated.list_input))
+            || !same(pricing.output, mtok(curated.list_output))
+        {
+            continue;
+        }
+        match curated.tier {
+            Some((threshold, [input, output, cache_write, cache_read])) => {
+                pricing.input_above_200k = Some(mtok(input));
+                pricing.output_above_200k = Some(mtok(output));
+                pricing.cache_write_above_200k = Some(mtok(cache_write));
+                pricing.cache_read_above_200k = Some(mtok(cache_read));
+                pricing.long_context_threshold = threshold;
+            }
+            None => {
+                pricing.input_above_200k = None;
+                pricing.output_above_200k = None;
+                pricing.cache_write_above_200k = None;
+                pricing.cache_read_above_200k = None;
+            }
+        }
+    }
 }
 
 /// Per-token rates (cost / 1M tokens)
@@ -369,8 +469,6 @@ fn version_suffix_ok(needle: &str, rest: &str) -> bool {
     }
 }
 
-const TIERED_THRESHOLD: u64 = 200_000;
-
 /// 1h cache writes are billed at 2x the base input rate unless the pricing
 /// entry carries an explicit 1h rate; the 5m rate is the model's cache_write
 /// rate. The tiered >200k rate for 1h writes is likewise derived from the
@@ -402,66 +500,84 @@ pub fn calculate_usage_cost(model: Option<&str>, usage: &Usage) -> f64 {
     cost_from_usage(usage, pricing)
 }
 
+/// Missing tier cache rates derive from the tier input rate with the
+/// usual cache multipliers.
+const CACHE_WRITE_INPUT_RATIO: f64 = 1.25;
+const CACHE_READ_INPUT_RATIO: f64 = 0.1;
+
 /// Pure cost computation for a usage block against a pricing entry.
+///
+/// Whole-request long-context billing: once the request's context (input +
+/// cache reads + cache writes) exceeds the row's threshold, every token of
+/// it, output included, bills at the tier rates.
 pub fn cost_from_usage(usage: &Usage, pricing: &ModelPricing) -> f64 {
-    let mut cost = 0.0;
-    cost += tiered_cost(usage.input_tokens, pricing.input, pricing.input_above_200k);
-    cost += tiered_cost(
-        usage.output_tokens,
-        pricing.output,
-        pricing.output_above_200k,
-    );
-    match &usage.cache_creation {
-        Some(cc) => {
-            // Per-duration breakdown present: the flat field is ignored.
-            cost += tiered_cost(
-                cc.ephemeral_5m_input_tokens,
-                pricing.cache_write,
-                pricing.cache_write_above_200k,
-            );
-            let base_1h = pricing
-                .cache_write_1h
-                .unwrap_or(pricing.input * CACHE_CREATE_1H_INPUT_MULTIPLIER);
-            cost += tiered_cost(
-                cc.ephemeral_1h_input_tokens,
-                base_1h,
-                pricing
-                    .input_above_200k
-                    .map(|r| r * CACHE_CREATE_1H_INPUT_MULTIPLIER),
-            );
-        }
-        None => {
-            // Older records: flat field at the 5m rate.
-            cost += tiered_cost(
-                usage.cache_creation_input_tokens,
-                pricing.cache_write,
-                pricing.cache_write_above_200k,
-            );
-        }
-    }
-    cost += tiered_cost(
-        usage.cache_read_input_tokens,
-        pricing.cache_read,
-        pricing.cache_read_above_200k,
-    );
+    let (cache_5m, cache_1h) = match &usage.cache_creation {
+        // Per-duration breakdown present: the flat field is ignored.
+        Some(cc) => (cc.ephemeral_5m_input_tokens, cc.ephemeral_1h_input_tokens),
+        // Older records: flat field at the 5m rate.
+        None => (usage.cache_creation_input_tokens, 0),
+    };
+    let context = usage
+        .input_tokens
+        .saturating_add(usage.cache_read_input_tokens)
+        .saturating_add(cache_5m)
+        .saturating_add(cache_1h);
+    let tier = if context > pricing.long_context_threshold {
+        long_context_rates(pricing)
+    } else {
+        None
+    };
+    let rates = tier.unwrap_or_else(|| Rates {
+        input: pricing.input,
+        output: pricing.output,
+        cache_write: pricing.cache_write,
+        cache_read: pricing.cache_read,
+        // An explicit 1h rate (LiteLLM) only exists for the base tier.
+        cache_write_1h: pricing
+            .cache_write_1h
+            .unwrap_or(pricing.input * CACHE_CREATE_1H_INPUT_MULTIPLIER),
+    });
+
+    let mut cost = usage.input_tokens as f64 * rates.input
+        + usage.output_tokens as f64 * rates.output
+        + cache_5m as f64 * rates.cache_write
+        + cache_1h as f64 * rates.cache_write_1h
+        + usage.cache_read_input_tokens as f64 * rates.cache_read;
     if usage.speed.as_deref() == Some("fast") {
         cost *= pricing.fast_multiplier;
     }
     cost
 }
 
-fn tiered_cost(tokens: u64, base_rate: f64, tiered_rate: Option<f64>) -> f64 {
-    if tokens == 0 {
-        return 0.0;
+struct Rates {
+    input: f64,
+    output: f64,
+    cache_write: f64,
+    cache_read: f64,
+    cache_write_1h: f64,
+}
+
+/// The row's long-context rates, if it has a tier (an input or output tier
+/// rate). A tier that omits a rate keeps the base rate for output; missing
+/// cache rates derive from the tier input with the standard multipliers,
+/// never below the base cache rate (upstream 2c51493f). 1h writes bill at
+/// twice the tier input.
+fn long_context_rates(p: &ModelPricing) -> Option<Rates> {
+    if p.input_above_200k.is_none() && p.output_above_200k.is_none() {
+        return None;
     }
-    match tiered_rate {
-        Some(above_rate) if tokens > TIERED_THRESHOLD => {
-            let base_tokens = TIERED_THRESHOLD as f64;
-            let excess_tokens = (tokens - TIERED_THRESHOLD) as f64;
-            base_tokens * base_rate + excess_tokens * above_rate
-        }
-        _ => tokens as f64 * base_rate,
-    }
+    let input = p.input_above_200k.unwrap_or(p.input);
+    Some(Rates {
+        input,
+        output: p.output_above_200k.unwrap_or(p.output),
+        cache_write: p
+            .cache_write_above_200k
+            .unwrap_or((input * CACHE_WRITE_INPUT_RATIO).max(p.cache_write)),
+        cache_read: p
+            .cache_read_above_200k
+            .unwrap_or((input * CACHE_READ_INPUT_RATIO).max(p.cache_read)),
+        cache_write_1h: input * CACHE_CREATE_1H_INPUT_MULTIPLIER,
+    })
 }
 
 #[cfg(test)]
@@ -531,6 +647,7 @@ mod tests {
             output_above_200k: None,
             cache_write_above_200k: None,
             cache_read_above_200k: None,
+            long_context_threshold: DEFAULT_LONG_CONTEXT_THRESHOLD,
             fast_multiplier: 1.0,
         }
     }
@@ -547,6 +664,7 @@ mod tests {
             output_above_200k: Some(mtok(22.50)),
             cache_write_above_200k: Some(mtok(7.50)),
             cache_read_above_200k: Some(mtok(0.60)),
+            long_context_threshold: DEFAULT_LONG_CONTEXT_THRESHOLD,
             fast_multiplier: 6.0,
         }
     }
@@ -629,31 +747,114 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cache_split_1h_tier_derived_from_input_tier() {
-        // input_above_200k = $6/MTok, so 1h above 200k = $12/MTok.
-        let cost = cost_from_usage(&cache_usage(0, 300_000), &tiered_pricing());
-        // 200k at 2*$3/MTok + 100k at 2*$6/MTok = $1.20 + $1.20 = $2.40
-        let expected = 200_000.0 * mtok(6.0) + 100_000.0 * mtok(12.0);
-        assert!((cost - expected).abs() < 1e-9, "cost={cost}");
+    // --- whole-request long-context billing (ported from ccusage) ---
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
     }
 
-    // --- tiered_cost ---
-
-    #[test]
-    fn tiered_cost_below_and_at_threshold_uses_base_rate() {
-        assert_eq!(tiered_cost(0, 1.0, Some(2.0)), 0.0);
-        assert_eq!(tiered_cost(100_000, 0.001, Some(0.002)), 100_000.0 * 0.001);
-        assert_eq!(tiered_cost(200_000, 0.001, Some(0.002)), 200_000.0 * 0.001);
+    /// Cost of a usage block for a model priced from the builtin table.
+    fn builtin_cost(model: &str, json: &str) -> f64 {
+        cost_from_usage(&usage_json(json), lookup_pricing(model).unwrap())
     }
 
     #[test]
-    fn tiered_cost_above_threshold_splits() {
-        let cost = tiered_cost(300_000, 0.001, Some(0.002));
-        let expected = 200_000.0 * 0.001 + 100_000.0 * 0.002;
-        assert!((cost - expected).abs() < 1e-10);
-        // No tier configured: everything bills at the base rate.
-        assert_eq!(tiered_cost(300_000, 0.001, None), 300_000.0 * 0.001);
+    fn long_context_bills_the_whole_request() {
+        // Sonnet 4.5: context = 100k input + 150k cache reads > 200K, so
+        // every token, output included, bills at $6 / $22.50 / $0.60. The
+        // old per-field split billed all of this at base rates, since no
+        // single field crossed 200K.
+        let cost = builtin_cost(
+            "claude-sonnet-4-5-20250929",
+            r#"{"input_tokens":100000,"output_tokens":10000,"cache_read_input_tokens":150000}"#,
+        );
+        assert!(close(cost, 0.1 * 6.0 + 0.01 * 22.5 + 0.15 * 0.6), "{cost}");
+    }
+
+    #[test]
+    fn context_at_the_threshold_bills_base_rates() {
+        let cost = builtin_cost(
+            "claude-sonnet-4-5",
+            r#"{"input_tokens":50000,"output_tokens":10000,"cache_read_input_tokens":150000}"#,
+        );
+        assert!(close(cost, 0.05 * 3.0 + 0.01 * 15.0 + 0.15 * 0.3), "{cost}");
+    }
+
+    #[test]
+    fn cache_writes_count_toward_context_and_1h_uses_twice_tier_input() {
+        // 60k 5m + 150k 1h writes = 210K context on Sonnet 4.5: 5m at the
+        // $7.50 tier write rate, 1h at 2 x the $6 tier input.
+        let cost = cost_from_usage(
+            &cache_usage(60_000, 150_000),
+            lookup_pricing("claude-sonnet-4-5").unwrap(),
+        );
+        assert!(close(cost, 0.06 * 7.5 + 0.15 * 12.0), "{cost}");
+    }
+
+    #[test]
+    fn haiku_5_5_tier_starts_above_100k() {
+        let at = builtin_cost(
+            "claude-haiku-5-5",
+            r#"{"input_tokens":100000,"output_tokens":1000}"#,
+        );
+        assert!(close(at, 0.1 * 0.1 + 0.001 * 0.5), "{at}");
+        let over = builtin_cost(
+            "claude-haiku-5-5",
+            r#"{"input_tokens":100001,"output_tokens":1000}"#,
+        );
+        assert!(close(over, 0.100_001 * 0.5 + 0.001 * 2.5), "{over}");
+    }
+
+    #[test]
+    fn curated_tiers_override_catalog_rows_at_list_rates_only() {
+        // LiteLLM-shaped rows: first-party Sonnet 4.5 without a tier, an
+        // Opus 4.6 row with a stale 200K tier, and a regional Sonnet 4.5
+        // uplift that bills its own (here: no) tier.
+        let map = merged_pricing(
+            crate::model_costs::parse_litellm_json(
+                r#"{
+                "claude-sonnet-4-5-20250929":
+                    {"input_cost_per_token": 3e-06, "output_cost_per_token": 1.5e-05},
+                "claude-opus-4-6":
+                    {"input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05,
+                     "input_cost_per_token_above_200k_tokens": 1e-05},
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0":
+                    {"input_cost_per_token": 3.3e-06, "output_cost_per_token": 1.65e-05}
+                }"#,
+            )
+            .unwrap(),
+        );
+        let sonnet = &map["claude-sonnet-4-5-20250929"];
+        assert_eq!(sonnet.input_above_200k, Some(mtok(6.0)));
+        assert!(map["claude-opus-4-6"].input_above_200k.is_none());
+        assert!(
+            map["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
+                .input_above_200k
+                .is_none()
+        );
+        // 4.6+ bills the full 1M window at standard rates.
+        let usage =
+            usage_json(r#"{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":900000}"#);
+        let opus = &map["claude-opus-4-6"];
+        assert!(close(
+            cost_from_usage(&usage, opus),
+            900_000.0 * opus.cache_read
+        ));
+    }
+
+    #[test]
+    fn missing_tier_cache_rates_derive_from_tier_input() {
+        let mut p = ModelPricing::new(1e-6, 5e-6, 1.25e-6, 0.1e-6);
+        p.input_above_200k = Some(2e-6);
+        let rates = long_context_rates(&p).unwrap();
+        assert!(close(rates.cache_write, 2.5e-6));
+        assert!(close(rates.cache_read, 0.2e-6));
+        assert!(close(rates.output, 5e-6));
+        // Never below the base cache rate.
+        p.input_above_200k = Some(0.5e-6);
+        let rates = long_context_rates(&p).unwrap();
+        assert!(close(rates.cache_write, 1.25e-6));
+        assert!(long_context_rates(&ModelPricing::new(1.0, 1.0, 1.0, 1.0)).is_none());
     }
 
     /// Snapshot of the builtin table's load-bearing rates — this class of

@@ -225,6 +225,7 @@ pub(crate) fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPric
             output_above_200k: field("output_cost_per_token_above_200k_tokens"),
             cache_write_above_200k: field("cache_creation_input_token_cost_above_200k_tokens"),
             cache_read_above_200k: field("cache_read_input_token_cost_above_200k_tokens"),
+            long_context_threshold: crate::pricing::DEFAULT_LONG_CONTEXT_THRESHOLD,
             fast_multiplier,
         };
         models.insert(name.clone(), pricing);

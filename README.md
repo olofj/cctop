@@ -25,7 +25,8 @@ think top(1) for your Claude Code spend.
   of megabytes of history don't slow it down
 - **Live pricing**: Claude rates from LiteLLM's pricing database, cached for
   24h under `~/.cache/cctop/`, merged on top of a built-in fallback table;
-  tiered >200k pricing, 5m/1h cache-write rates, and fast-mode multipliers
+  whole-request long-context pricing, 5m/1h cache-write rates, and
+  fast-mode multipliers
 - **Accurate counting**: upstream-ccusage dedup semantics — streamed partial
   writes, sidechain replays, lines copied into resumed/forked sessions, and
   progress-wrapped subagent records all collapse to the most complete copy;
