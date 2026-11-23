@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use time::OffsetDateTime;
 
 use crate::types::{
@@ -90,7 +90,7 @@ impl AppState {
     pub fn new(window: WindowSize, project_filter: Option<String>) -> Self {
         Self {
             entries: Vec::new(),
-            dedup_index: FxHashMap::default(),
+            dedup_index: DedupIndex::default(),
             last_prune: None,
             window,
             sort_column: SortColumn::LastActivity,
@@ -853,7 +853,32 @@ struct DedupRoute {
     session_alias: Option<String>,
 }
 
-type DedupIndex = FxHashMap<u64, Vec<DedupRoute>>;
+/// Key hash -> routes, plus the set of registered (hash, slot, is_alias)
+/// routes so "already routed?" is O(1) even in a bucket shared by many
+/// entries (a gateway reusing one message id). An alias route in bucket
+/// `h` always names the session `h` was computed from, so the flag
+/// identifies it.
+#[derive(Debug, Default)]
+struct DedupIndex {
+    buckets: FxHashMap<u64, Vec<DedupRoute>>,
+    routed: FxHashSet<(u64, usize, bool)>,
+}
+
+impl DedupIndex {
+    fn get(&self, hash: &u64) -> Option<&Vec<DedupRoute>> {
+        self.buckets.get(hash)
+    }
+
+    /// Add a route unless the same one is already registered.
+    fn add(&mut self, hash: u64, index: usize, session_alias: Option<&String>) {
+        if self.routed.insert((hash, index, session_alias.is_some())) {
+            self.buckets.entry(hash).or_default().push(DedupRoute {
+                index,
+                session_alias: session_alias.cloned(),
+            });
+        }
+    }
+}
 
 /// Exact dedup key. With a requestId, the key is (message_id, request_id)
 /// and is global: Claude Code copies identical response lines into resumed/
@@ -966,10 +991,10 @@ fn push_deduped(entries: &mut Vec<TokenEntry>, index: &mut DedupIndex, entry: To
         return;
     }
 
-    // No match: accept and index (a fresh slot cannot already be routed).
+    // No match: accept and index.
     let i = entries.len();
     entries.push(entry);
-    index_entry(index, entries, i, &msg_id, true);
+    index_entry(index, entries, i, &msg_id);
 }
 
 /// Handle a duplicate hit at `i`: register cross-session aliases, apply the
@@ -994,36 +1019,19 @@ fn merge_duplicate(
             let side_entry =
                 sidechain_involved.then(|| sidechain_entry_dedupe_hash(msg_id, session));
             for hash in [Some(side), side_entry].into_iter().flatten() {
-                let routes = index.entry(hash).or_default();
-                if !routes
-                    .iter()
-                    .any(|r| r.index == i && r.session_alias.as_ref() == Some(session))
-                {
-                    routes.push(DedupRoute {
-                        index: i,
-                        session_alias: Some(session.clone()),
-                    });
-                }
+                index.add(hash, i, Some(session));
             }
         }
     }
     if should_replace(&candidate, &entries[i]) {
         entries[i] = candidate;
-        index_entry(index, entries, i, msg_id, false);
+        index_entry(index, entries, i, msg_id);
     }
 }
 
 /// Register `entries[i]` under its exact and sidechain hashes, plus the
-/// sidechain-only bucket when it is itself a sidechain entry. `fresh` skips
-/// the already-present scan for a newly pushed slot, which keeps inserts
-/// O(1) in buckets shared by many entries.
-fn index_entry(
-    index: &mut DedupIndex,
-    entries: &[TokenEntry],
-    i: usize,
-    msg_id: &str,
-    fresh: bool,
-) {
+/// sidechain-only bucket when it is itself a sidechain entry (idempotent).
+fn index_entry(index: &mut DedupIndex, entries: &[TokenEntry], i: usize, msg_id: &str) {
     let entry = &entries[i];
     let exact = exact_dedupe_hash(
         msg_id,
@@ -1035,17 +1043,7 @@ fn index_entry(
     let side_entry = (entry.is_sidechain == Some(true))
         .then(|| sidechain_entry_dedupe_hash(msg_id, &entry.dedup_session));
     for hash in [Some(exact), Some(side), side_entry].into_iter().flatten() {
-        let routes = index.entry(hash).or_default();
-        if fresh
-            || !routes
-                .iter()
-                .any(|r| r.index == i && r.session_alias.is_none())
-        {
-            routes.push(DedupRoute {
-                index: i,
-                session_alias: None,
-            });
-        }
+        index.add(hash, i, None);
     }
 }
 
@@ -1076,10 +1074,13 @@ fn should_replace(candidate: &TokenEntry, existing: &TokenEntry) -> bool {
 /// entry's new position, or None if it was dropped. Remapped rather than
 /// rebuilt from the entries, since session-alias routes live only here.
 fn remap_index(index: &mut DedupIndex, new_pos: &[Option<usize>]) {
-    index.retain(|_, routes| {
+    let DedupIndex { buckets, routed } = index;
+    routed.clear();
+    buckets.retain(|&hash, routes| {
         routes.retain_mut(|route| match new_pos[route.index] {
             Some(i) => {
                 route.index = i;
+                routed.insert((hash, i, route.session_alias.is_some()));
                 true
             }
             None => false,
@@ -1868,12 +1869,16 @@ mod tests {
 
     #[test]
     fn equal_tokens_speed_wins() {
-        let result = merge(vec![
-            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
-            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, true),
-        ]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].speed_rank, 1);
+        for order in [[false, true], [true, false]] {
+            let result = merge(
+                order
+                    .iter()
+                    .map(|&speed| dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, speed))
+                    .collect(),
+            );
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].speed_rank, 1);
+        }
     }
 
     #[test]
@@ -1904,8 +1909,25 @@ mod tests {
         let mut fast = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, true);
         fast.speed_rank = 2;
         fast.model = "claude-opus-4-6-fast".to_string();
-        let result = merge(vec![standard, fast]);
-        assert_eq!(result[0].model, "claude-opus-4-6-fast");
+        for order in [vec![standard.clone(), fast.clone()], vec![fast, standard]] {
+            assert_eq!(merge(order)[0].model, "claude-opus-4-6-fast");
+        }
+    }
+
+    #[test]
+    fn non_sidechain_replay_finds_survivor_through_sidechain_alias() {
+        // A sidechain copy from session b merges with a larger sidechain
+        // copy from session a, which becomes the survivor. A non-sidechain
+        // replay in session b probes b's sidechain-only bucket: only the
+        // alias route registered at merge time leads it to the survivor.
+        let t = fixed_now();
+        let result = merge(vec![
+            dedup_entry_in("m", Some("r1"), Some(true), 100, "b", t),
+            dedup_entry_in("m", Some("r1"), Some(true), 200, "a", t),
+            dedup_entry_in("m", Some("r9"), None, 50, "b", t),
+        ]);
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert_eq!(result[0].input_tokens, 50, "non-sidechain copy wins");
     }
 
     #[test]
@@ -1939,7 +1961,29 @@ mod tests {
                 .collect(),
         );
         assert_eq!(result.len(), n);
-        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        // Generous bound: linear is ~0.1s, quadratic ~25s (debug build).
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn reused_message_id_copied_into_resumed_session_stays_linear() {
+        // Same gateway, plus a resumed session that copies every line:
+        // each copy merges cross-session and registers alias routes, whose
+        // presence check must not scan the shared bucket.
+        let n = 40_000;
+        let t = fixed_now();
+        let line = |i: usize, session: &str| {
+            dedup_entry_in("m", Some(&format!("r{i}")), None, 1, session, t)
+        };
+        let start = std::time::Instant::now();
+        let result = merge(
+            (0..n)
+                .map(|i| line(i, "s1"))
+                .chain((0..n).map(|i| line(i, "s2")))
+                .collect(),
+        );
+        assert_eq!(result.len(), n);
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]
