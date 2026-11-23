@@ -84,6 +84,9 @@ fn parse_record(line: &str, identity: &FileIdentity) -> Option<Vec<TokenEntry>> 
     if record.message.model.as_deref() == Some(SYNTHETIC_MODEL) {
         return None;
     }
+    if !record.message.usage.token_sums_representable() {
+        return None;
+    }
 
     let cost = calculate_cost(&record);
 
@@ -135,8 +138,12 @@ fn parse_record(line: &str, identity: &FileIdentity) -> Option<Vec<TokenEntry>> 
     // model. They carry no costUSD, so they are always priced from tokens.
     // Their dedup key is {messageId}:advisor:{index}: replayed lines still
     // collapse, while advisor entries never collide with their parent.
-    // (Parsed from the raw line; progress wrappers never match.)
+    // (Parsed from the raw line, direct or progress-wrapped; the entry's
+    // dedup key comes from the record it belongs to.)
     for (index, (advisor_model, usage)) in advisor_usages_from_line(line).into_iter().enumerate() {
+        if !usage.token_sums_representable() {
+            continue;
+        }
         let cost = calculate_usage_cost(Some(&advisor_model), &usage);
         let message_id = record
             .message
@@ -617,6 +624,85 @@ mod parse_tests {
         assert_eq!(advisor.message_id.as_deref(), Some("msg1:advisor:0"));
         assert_eq!(advisor.request_id.as_deref(), Some("req1"));
         assert!(advisor.cost > 0.0, "advisor priced under its own model");
+    }
+
+    #[test]
+    fn advisor_iterations_inside_progress_wrappers_are_counted() {
+        // A subagent transcript replaying an advisor turn: the advisor's
+        // usage sits under data.message.message.usage.iterations.
+        let line = concat!(
+            r#"{"type":"progress","timestamp":"2026-07-20T10:00:00Z","data":{"message":{"#,
+            r#""timestamp":"2026-07-20T10:00:01Z","requestId":"req1","message":{"#,
+            r#""model":"claude-opus-4-8","id":"msg1","usage":{"input_tokens":100,"#,
+            r#""output_tokens":50,"iterations":["#,
+            r#"{"type":"message","input_tokens":100,"output_tokens":50},"#,
+            r#"{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":700,"#,
+            r#""output_tokens":30}]}}}}}"#
+        );
+        let entries = parse_line(line, &identity());
+        assert_eq!(entries.len(), 2);
+        let advisor = &entries[1];
+        assert_eq!(advisor.model, "claude-haiku-4-5");
+        assert_eq!(advisor.input_tokens, 700);
+        // Keyed off the nested record, like the direct-line case.
+        assert_eq!(advisor.message_id.as_deref(), Some("msg1:advisor:0"));
+        assert_eq!(advisor.request_id.as_deref(), Some("req1"));
+    }
+
+    /// A usage line whose top-level split covers only the first of two
+    /// `message` iterations (the flat field sums both).
+    fn multi_iteration_line(second_split: &str) -> String {
+        concat!(
+            r#"{"timestamp":"2026-07-20T10:00:00Z","requestId":"r1","message":{"#,
+            r#""model":"claude-opus-4-8","id":"m1","usage":{"input_tokens":1,"#,
+            r#""output_tokens":1,"cache_creation_input_tokens":3000,"#,
+            r#""cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":0},"#,
+            r#""iterations":["#,
+            r#"{"type":"message","input_tokens":1,"output_tokens":1,"#,
+            r#""cache_creation":{"ephemeral_5m_input_tokens":1000}},"#,
+            r#"{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":1,"output_tokens":1},"#,
+            r#"{"type":"message","input_tokens":0,"output_tokens":0SECOND}]}}}"#
+        )
+        .replace("SECOND", second_split)
+    }
+
+    #[test]
+    fn cache_split_sums_every_message_iteration() {
+        let line = multi_iteration_line(r#","cache_creation":{"ephemeral_1h_input_tokens":2000}"#);
+        let main = &parse_line(&line, &identity())[0];
+        assert_eq!(main.cache_write_tokens, 3000);
+        // 1000 5m at $6.25/MTok + 2000 1h at 2 x $5/MTok, plus 1 in / 1 out.
+        let expected = 1000.0 * 6.25e-6 + 2000.0 * 10e-6 + 5e-6 + 25e-6;
+        assert!((main.cost - expected).abs() < 1e-12, "{}", main.cost);
+    }
+
+    #[test]
+    fn incomplete_iteration_splits_keep_the_top_level_split() {
+        // A message iteration without a (well-formed) split: a partial sum
+        // would undercount, so the top-level split stands. The record
+        // itself is never rejected over its iterations.
+        for second in ["", r#","cache_creation":{"ephemeral_1h_input_tokens":"x"}"#] {
+            let line = multi_iteration_line(second);
+            let entries = parse_line(&line, &identity());
+            assert_eq!(entries[0].model, "claude-opus-4-8", "{second}");
+            assert_eq!(entries[0].cache_write_tokens, 1000, "{second}");
+        }
+    }
+
+    #[test]
+    fn records_whose_token_sums_overflow_are_skipped() {
+        let huge = u64::MAX / 2 + 1;
+        let line = format!(
+            r#"{{"timestamp":"2026-06-09T10:00:00Z","message":{{"usage":{{"input_tokens":{huge},"output_tokens":{huge}}},"model":"claude-haiku-4-5","id":"m1"}}}}"#
+        );
+        assert!(parse_line(&line, &identity()).is_empty());
+        // An overflowing advisor iteration is dropped; its parent stays.
+        let line = format!(
+            r#"{{"timestamp":"2026-06-09T10:00:00Z","message":{{"model":"claude-opus-4-8","id":"m1","usage":{{"input_tokens":1,"output_tokens":1,"iterations":[{{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":{huge},"output_tokens":{huge}}}]}}}}}}"#
+        );
+        let entries = parse_line(&line, &identity());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-opus-4-8");
     }
 
     #[test]

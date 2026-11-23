@@ -335,7 +335,9 @@ fn render_graph(f: &mut Frame, app: &AppState, area: Rect, now: OffsetDateTime) 
     let bucket_value = |b: &crate::types::HistBucket| -> f64 {
         match metric {
             crate::types::GraphMetric::Tokens => {
-                (b.input_tokens + b.output_tokens + b.cache_tokens) as f64
+                b.input_tokens
+                    .saturating_add(b.output_tokens)
+                    .saturating_add(b.cache_tokens) as f64
             }
             crate::types::GraphMetric::Cost => b.cost,
         }

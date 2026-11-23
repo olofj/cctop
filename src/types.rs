@@ -30,15 +30,87 @@ pub struct Message {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(from = "UsageJson")]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    #[serde(default)]
     pub cache_creation_input_tokens: u64,
-    #[serde(default)]
     pub cache_read_input_tokens: u64,
+    /// The 5m/1h cache-write split: summed over `message` iterations when
+    /// the record has them, else the top-level split.
     pub cache_creation: Option<CacheCreation>,
     pub speed: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UsageJson {
+    input_tokens: u64,
+    output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    cache_creation: Option<CacheCreation>,
+    speed: Option<String>,
+    #[serde(default, deserialize_with = "message_iterations_split")]
+    iterations: Option<CacheCreation>,
+}
+
+impl From<UsageJson> for Usage {
+    fn from(json: UsageJson) -> Self {
+        Self {
+            input_tokens: json.input_tokens,
+            output_tokens: json.output_tokens,
+            cache_creation_input_tokens: json.cache_creation_input_tokens,
+            cache_read_input_tokens: json.cache_read_input_tokens,
+            // Advisor turns report one usage object whose top-level split
+            // covers only the first `message` iteration, while the flat
+            // cache_creation_input_tokens sums them all (upstream f82d1e9c).
+            cache_creation: json.iterations.or(json.cache_creation),
+            speed: json.speed,
+        }
+    }
+}
+
+/// The cache-write split summed over the `message` entries of
+/// usage.iterations. None when there is no `message` iteration or one of
+/// them lacks a well-formed split (a partial sum would undercount like the
+/// top-level split it replaces). Never fails: a malformed `iterations`
+/// member must not reject the record around it.
+fn message_iterations_split<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<CacheCreation>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(iterations) = value.as_array() else {
+        return Ok(None);
+    };
+    let mut total = CacheCreation {
+        ephemeral_5m_input_tokens: 0,
+        ephemeral_1h_input_tokens: 0,
+    };
+    let mut has_message = false;
+    for iteration in iterations {
+        if iteration.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        has_message = true;
+        let Some(split) = iteration.get("cache_creation").and_then(|c| c.as_object()) else {
+            return Ok(None);
+        };
+        let count = |key: &str| match split.get(key) {
+            None => Some(0),
+            Some(v) => v.as_u64(),
+        };
+        let (Some(five_m), Some(one_h)) = (
+            count("ephemeral_5m_input_tokens"),
+            count("ephemeral_1h_input_tokens"),
+        ) else {
+            return Ok(None);
+        };
+        total.ephemeral_5m_input_tokens = total.ephemeral_5m_input_tokens.saturating_add(five_m);
+        total.ephemeral_1h_input_tokens = total.ephemeral_1h_input_tokens.saturating_add(one_h);
+    }
+    Ok(has_message.then_some(total))
 }
 
 /// Per-duration cache-creation breakdown (newer Claude Code records).
@@ -65,9 +137,28 @@ impl Usage {
     /// otherwise the flat field.
     pub fn cache_creation_token_count(&self) -> u64 {
         match &self.cache_creation {
-            Some(cc) => cc.ephemeral_5m_input_tokens + cc.ephemeral_1h_input_tokens,
+            Some(cc) => cc
+                .ephemeral_5m_input_tokens
+                .saturating_add(cc.ephemeral_1h_input_tokens),
             None => self.cache_creation_input_tokens,
         }
+    }
+
+    /// Whether every token sum derived from this record fits in a u64.
+    /// Records that don't are skipped (as upstream does) instead of
+    /// panicking in debug builds or silently wrapping in release.
+    pub fn token_sums_representable(&self) -> bool {
+        let cache_creation = match &self.cache_creation {
+            Some(cc) => cc
+                .ephemeral_5m_input_tokens
+                .checked_add(cc.ephemeral_1h_input_tokens),
+            None => Some(self.cache_creation_input_tokens),
+        };
+        cache_creation
+            .and_then(|cc| cc.checked_add(self.input_tokens))
+            .and_then(|t| t.checked_add(self.output_tokens))
+            .and_then(|t| t.checked_add(self.cache_read_input_tokens))
+            .is_some()
     }
 }
 
@@ -101,6 +192,20 @@ struct UsageIteration {
     usage: Usage,
 }
 
+/// A `type:"progress"` wrapper around an assistant message, for advisor
+/// iterations of replayed subagent messages.
+#[derive(Debug, Deserialize)]
+struct ProgressAdvisorEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+    data: ProgressAdvisorData,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProgressAdvisorData {
+    message: AdvisorEnvelope,
+}
+
 /// Extract advisor-model usage from a raw JSONL line: iterations with
 /// type "advisor_message" and a non-empty model. The advisor tool's
 /// secondary model calls are recorded there, priced under the advisor's
@@ -111,12 +216,16 @@ pub fn advisor_usages_from_line(line: &str) -> Vec<(String, Usage)> {
     if !line.contains("\"advisor_message\"") {
         return Vec::new();
     }
-    let Ok(envelope) = serde_json::from_str::<AdvisorEnvelope>(line) else {
-        return Vec::new();
+    // A direct assistant line, or a progress wrapper whose assistant
+    // message is nested under data.message.message (upstream 146aca30).
+    let usage = match serde_json::from_str::<AdvisorEnvelope>(line) {
+        Ok(envelope) => envelope.message.usage,
+        Err(_) => match serde_json::from_str::<ProgressAdvisorEnvelope>(line) {
+            Ok(wrapper) if wrapper.kind == "progress" => wrapper.data.message.message.usage,
+            _ => return Vec::new(),
+        },
     };
-    envelope
-        .message
-        .usage
+    usage
         .iterations
         .into_iter()
         .filter(|iteration| iteration.kind == "advisor_message")
@@ -214,7 +323,10 @@ pub struct TokenEntry {
 
 impl TokenEntry {
     pub fn token_total(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
     }
 }
 

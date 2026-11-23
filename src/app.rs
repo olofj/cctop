@@ -210,8 +210,8 @@ impl AppState {
         let mut cost = 0.0f64;
         for e in &self.entries {
             if e.timestamp >= cutoff {
-                input += e.input_tokens;
-                output += e.output_tokens;
+                input = input.saturating_add(e.input_tokens);
+                output = output.saturating_add(e.output_tokens);
                 cost += e.cost;
             }
         }
@@ -269,9 +269,12 @@ impl AppState {
             let Some(idx) = grid.index_of(e.timestamp) else {
                 continue;
             };
-            buckets[idx].input_tokens += e.input_tokens;
-            buckets[idx].output_tokens += e.output_tokens;
-            buckets[idx].cache_tokens += e.cache_write_tokens + e.cache_read_tokens;
+            let b = &mut buckets[idx];
+            b.input_tokens = b.input_tokens.saturating_add(e.input_tokens);
+            b.output_tokens = b.output_tokens.saturating_add(e.output_tokens);
+            b.cache_tokens = b
+                .cache_tokens
+                .saturating_add(e.cache_write_tokens.saturating_add(e.cache_read_tokens));
             buckets[idx].cost += e.cost;
         }
 
@@ -604,12 +607,18 @@ impl AppState {
                             model_name: model_name.clone(),
                             ..Default::default()
                         });
-                gm.core.input_tokens += model_agg.core.input_tokens;
-                gm.core.output_tokens += model_agg.core.output_tokens;
+                gm.core.input_tokens = gm
+                    .core
+                    .input_tokens
+                    .saturating_add(model_agg.core.input_tokens);
+                gm.core.output_tokens = gm
+                    .core
+                    .output_tokens
+                    .saturating_add(model_agg.core.output_tokens);
                 gm.core.cost += model_agg.core.cost;
                 gm.session_count += model_agg.sessions.len();
                 for (i, v) in model_agg.core.sparkline.iter().enumerate() {
-                    gm.core.sparkline[i] += v;
+                    gm.core.sparkline[i] = gm.core.sparkline[i].saturating_add(*v);
                 }
                 gm.core.last_activity = gm.core.last_activity.max(model_agg.core.last_activity);
                 gm.projects.push((proj.name.clone(), model_agg));
@@ -1179,10 +1188,10 @@ struct Agg {
 impl Agg {
     /// Fold an in-window entry into the totals (idx = sparkline bucket).
     fn add(&mut self, entry: &TokenEntry, idx: usize) {
-        self.input_tokens += entry.input_tokens;
-        self.output_tokens += entry.output_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(entry.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(entry.output_tokens);
         self.cost += entry.cost;
-        self.sparkline[idx] += entry.token_total();
+        self.sparkline[idx] = self.sparkline[idx].saturating_add(entry.token_total());
         self.touch(entry.timestamp);
     }
 
@@ -2617,6 +2626,25 @@ mod tests {
     }
 
     // --- f64_cmp tests ---
+
+    #[test]
+    fn huge_token_counts_saturate_across_entries() {
+        // Each record fits in a u64 on its own (the parser rejects ones
+        // that don't), but their sums must saturate, not panic or wrap.
+        let now = fixed_now();
+        let big = u64::MAX / 2 + 1;
+        let mut app = AppState::new(WindowSize::W1h, None);
+        app.ingest(vec![
+            make_entry("/p", "s1", now - time::Duration::minutes(1), big),
+            make_entry("/p", "s2", now - time::Duration::minutes(2), big),
+        ]);
+        let (input_rate, _, _) = app.total_rate(now);
+        assert_eq!(input_rate, u64::MAX as f64 / 60.0);
+        let rows = app.rows(now).to_vec();
+        assert_eq!(rows[0].input_per_min, u64::MAX as f64 / 60.0);
+        let hist = app.histogram(now, 1, None);
+        assert_eq!(hist[0].input_tokens, u64::MAX);
+    }
 
     #[test]
     fn f64_cmp_orders_and_survives_nan() {
