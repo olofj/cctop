@@ -213,6 +213,26 @@ pub(crate) fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPric
             .filter(|m| m.is_finite() && *m >= 1.0)
             .unwrap_or_else(|| fast_multiplier_for(&normalize(&name.to_ascii_lowercase())));
 
+        // Long-context tier: the 200K fields, else the 100K ones (Haiku 5.5
+        // carries only those). The `_batches` variants are a different
+        // product and stay ignored.
+        let tier_at = |size: &str| {
+            let tier = |kind: &str| field(&format!("{kind}_above_{size}_tokens"));
+            let rates = [
+                tier("input_cost_per_token"),
+                tier("output_cost_per_token"),
+                tier("cache_creation_input_token_cost"),
+                tier("cache_read_input_token_cost"),
+            ];
+            (rates[0].is_some() || rates[1].is_some()).then_some(rates)
+        };
+        let (long_context_threshold, [input_tier, output_tier, cache_write_tier, cache_read_tier]) =
+            match (tier_at("200k"), tier_at("100k")) {
+                (Some(rates), _) => (crate::pricing::DEFAULT_LONG_CONTEXT_THRESHOLD, rates),
+                (None, Some(rates)) => (100_000, rates),
+                (None, None) => (crate::pricing::DEFAULT_LONG_CONTEXT_THRESHOLD, [None; 4]),
+            };
+
         let pricing = ModelPricing {
             input,
             output,
@@ -221,11 +241,11 @@ pub(crate) fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPric
             cache_read: field("cache_read_input_token_cost")
                 .unwrap_or(input * DEFAULT_CACHE_READ_INPUT_RATIO),
             cache_write_1h: field("cache_creation_input_token_cost_above_1hr"),
-            input_above_200k: field("input_cost_per_token_above_200k_tokens"),
-            output_above_200k: field("output_cost_per_token_above_200k_tokens"),
-            cache_write_above_200k: field("cache_creation_input_token_cost_above_200k_tokens"),
-            cache_read_above_200k: field("cache_read_input_token_cost_above_200k_tokens"),
-            long_context_threshold: crate::pricing::DEFAULT_LONG_CONTEXT_THRESHOLD,
+            input_above_200k: input_tier,
+            output_above_200k: output_tier,
+            cache_write_above_200k: cache_write_tier,
+            cache_read_above_200k: cache_read_tier,
+            long_context_threshold,
             fast_multiplier,
         };
         models.insert(name.clone(), pricing);
@@ -332,6 +352,45 @@ mod tests {
         assert_eq!(map["anthropic.claude-opus-4-8"].fast_multiplier, 2.0);
         // No override and no entry field: 1x.
         assert_eq!(map["claude-test-derived"].fast_multiplier, 1.0);
+    }
+
+    #[test]
+    fn haiku_100k_tier_parsed_for_rows_the_curated_table_skips() {
+        // A regional Haiku 5.5 row (1.1x list) carries its tier only in the
+        // *_above_100k_tokens fields; without them a 150K request billed at
+        // a fifth of its price.
+        let map = parse_litellm_json(
+            r#"{"us.anthropic.claude-haiku-5-5": {
+                "input_cost_per_token": 1.1e-07, "output_cost_per_token": 5.5e-07,
+                "input_cost_per_token_above_100k_tokens": 5.5e-07,
+                "output_cost_per_token_above_100k_tokens": 2.75e-06,
+                "input_cost_per_token_above_100k_tokens_batches": 1e-09}}"#,
+        )
+        .unwrap();
+        let p = &map["us.anthropic.claude-haiku-5-5"];
+        assert_eq!(p.long_context_threshold, 100_000);
+        assert_eq!(p.input_above_200k, Some(5.5e-07));
+        let usage: crate::types::Usage =
+            serde_json::from_str(r#"{"input_tokens":150000,"output_tokens":1000}"#).unwrap();
+        let cost = crate::pricing::cost_from_usage(&usage, p);
+        assert!((cost - (0.15 * 0.55 + 0.001 * 2.75)).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn bedrock_5x_rows_without_fast_value_use_the_override() {
+        let row = r#"{"input_cost_per_token": 4.4e-06, "output_cost_per_token": 2.2e-05}"#;
+        let map = parse_litellm_json(&format!(
+            r#"{{"us.anthropic.claude-opus-5-5": {row}, "anthropic.claude-opus-5": {row},
+                "global.anthropic.claude-fable-5-2": {row}, "anthropic.claude-sonnet-5-5": {row}}}"#
+        ))
+        .unwrap();
+        assert_eq!(map["us.anthropic.claude-opus-5-5"].fast_multiplier, 2.0);
+        assert_eq!(map["anthropic.claude-opus-5"].fast_multiplier, 2.0);
+        assert_eq!(
+            map["global.anthropic.claude-fable-5-2"].fast_multiplier,
+            2.0
+        );
+        assert_eq!(map["anthropic.claude-sonnet-5-5"].fast_multiplier, 1.0);
     }
 
     #[test]

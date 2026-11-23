@@ -63,7 +63,7 @@ impl ModelPricing {
 static ACTIVE_PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
 
 /// The builtin floor with a dynamic table merged on top, so builtin-only
-/// models (e.g. fable-5-2, absent from LiteLLM) keep their rates when a
+/// models (or ones a stale LiteLLM snapshot lacks) keep their rates when a
 /// download succeeds. The curated long-context tiers apply last, to rows
 /// from either source.
 fn merged_pricing(dynamic: HashMap<String, ModelPricing>) -> HashMap<String, ModelPricing> {
@@ -306,6 +306,11 @@ const FAST_MULTIPLIER_OVERRIDES: &[(&str, f64)] = &[
     ("claude-opus-4-6", 6.0),
     ("claude-opus-4-7", 6.0),
     ("claude-opus-4-8", 2.0),
+    // 5.x: LiteLLM's first-party rows carry fast = 2, its Bedrock/Vertex
+    // rows don't. The version-suffix rule keeps opus-5 off opus-5-5.
+    ("claude-opus-5", 2.0),
+    ("claude-opus-5-5", 2.0),
+    ("claude-fable-5-2", 2.0),
 ];
 
 pub(crate) fn fast_multiplier_for(normalized_key: &str) -> f64 {
