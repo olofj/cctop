@@ -660,7 +660,8 @@ mod parse_tests {
             r#""iterations":["#,
             r#"{"type":"message","input_tokens":1,"output_tokens":1,"#,
             r#""cache_creation":{"ephemeral_5m_input_tokens":1000}},"#,
-            r#"{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":1,"output_tokens":1},"#,
+            r#"{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":1,"#,
+            r#""output_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":99}},"#,
             r#"{"type":"message","input_tokens":0,"output_tokens":0SECOND}]}}}"#
         )
         .replace("SECOND", second_split)
@@ -669,8 +670,11 @@ mod parse_tests {
     #[test]
     fn cache_split_sums_every_message_iteration() {
         let line = multi_iteration_line(r#","cache_creation":{"ephemeral_1h_input_tokens":2000}"#);
-        let main = &parse_line(&line, &identity())[0];
+        let entries = parse_line(&line, &identity());
+        let (main, advisor) = (&entries[0], &entries[1]);
+        // The advisor's own cache writes stay on the advisor entry.
         assert_eq!(main.cache_write_tokens, 3000);
+        assert_eq!(advisor.cache_write_tokens, 99);
         // 1000 5m at $6.25/MTok + 2000 1h at 2 x $5/MTok, plus 1 in / 1 out.
         let expected = 1000.0 * 6.25e-6 + 2000.0 * 10e-6 + 5e-6 + 25e-6;
         assert!((main.cost - expected).abs() < 1e-12, "{}", main.cost);
@@ -687,6 +691,49 @@ mod parse_tests {
             assert_eq!(entries[0].model, "claude-opus-4-8", "{second}");
             assert_eq!(entries[0].cache_write_tokens, 1000, "{second}");
         }
+    }
+
+    #[test]
+    fn fallback_turn_keeps_the_failed_attempts_cache_writes_out() {
+        // Shape of a real fallback line: the `message` iteration is the
+        // failed attempt on another model; the top-level usage (flat field
+        // and split) is the fallback model's. The iteration sum (16) does
+        // not match the flat total (0), so the top-level split stands.
+        let line = concat!(
+            r#"{"timestamp":"2026-07-22T10:00:00Z","requestId":"r1","message":{"#,
+            r#""model":"claude-opus-4-8","id":"m1","usage":{"input_tokens":2,"#,
+            r#""output_tokens":636,"cache_creation_input_tokens":0,"#,
+            r#""cache_read_input_tokens":174086,"#,
+            r#""cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"#,
+            r#""iterations":["#,
+            r#"{"type":"message","model":"claude-fable-5","input_tokens":2,"output_tokens":2,"#,
+            r#""cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":16}},"#,
+            r#"{"type":"fallback_message","model":"claude-opus-4-8","input_tokens":2,"#,
+            r#""output_tokens":636,"cache_creation":{"ephemeral_5m_input_tokens":0,"#,
+            r#""ephemeral_1h_input_tokens":0}}]}}}"#
+        );
+        let entries = parse_line(line, &identity());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn odd_iterations_do_not_hide_advisor_entries() {
+        // An iteration of another type without token fields, and a
+        // malformed advisor entry, must not drop the valid advisor.
+        let line = concat!(
+            r#"{"timestamp":"2026-07-20T10:00:00Z","message":{"model":"claude-opus-4-8","#,
+            r#""id":"m1","usage":{"input_tokens":1,"output_tokens":1,"iterations":["#,
+            r#"{"type":"compaction"},"#,
+            r#"{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":"x"},"#,
+            r#"{"type":"advisor_message","model":"claude-haiku-4-5","input_tokens":700,"#,
+            r#""output_tokens":30}]}}}"#
+        );
+        let entries = parse_line(line, &identity());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].input_tokens, 700);
+        // Keyed by its position among the parseable advisor entries.
+        assert_eq!(entries[1].message_id.as_deref(), Some("m1:advisor:0"));
     }
 
     #[test]

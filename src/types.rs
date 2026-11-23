@@ -80,15 +80,25 @@ struct UsageJson {
 
 impl From<UsageJson> for Usage {
     fn from(json: UsageJson) -> Self {
+        // Advisor turns report one usage object whose top-level split
+        // covers only the first `message` iteration, while the flat
+        // cache_creation_input_tokens sums them all (upstream f82d1e9c).
+        // The iteration sum is taken only when it agrees with that flat
+        // total: a fallback turn also lists the failed attempt on another
+        // model as a `message` iteration, and its cache writes are not
+        // this record's (the flat field and top-level split exclude them).
+        let iterations = json.iterations.filter(|split| {
+            split
+                .ephemeral_5m_input_tokens
+                .checked_add(split.ephemeral_1h_input_tokens)
+                == Some(json.cache_creation_input_tokens)
+        });
         Self {
             input_tokens: json.input_tokens,
             output_tokens: json.output_tokens,
             cache_creation_input_tokens: json.cache_creation_input_tokens,
             cache_read_input_tokens: json.cache_read_input_tokens,
-            // Advisor turns report one usage object whose top-level split
-            // covers only the first `message` iteration, while the flat
-            // cache_creation_input_tokens sums them all (upstream f82d1e9c).
-            cache_creation: json.iterations.or(json.cache_creation),
+            cache_creation: iterations.or(json.cache_creation),
             speed: json.speed,
         }
     }
@@ -199,16 +209,17 @@ struct AdvisorEnvelopeMessage {
 
 #[derive(Debug, Deserialize)]
 struct AdvisorEnvelopeUsage {
+    /// Kept as raw values and parsed one by one, so an iteration of
+    /// another type (or a malformed one) cannot hide the advisor entries
+    /// next to it.
     #[serde(default)]
-    iterations: Vec<UsageIteration>,
+    iterations: Vec<serde_json::Value>,
 }
 
 /// One entry of usage.iterations. Token fields are flattened into the
 /// iteration object itself, not nested under a "usage" key.
 #[derive(Debug, Deserialize)]
 struct UsageIteration {
-    #[serde(rename = "type")]
-    kind: String,
     model: Option<String>,
     #[serde(flatten)]
     usage: Usage,
@@ -250,7 +261,8 @@ pub fn advisor_usages_from_line(line: &str) -> Vec<(String, Usage)> {
     usage
         .iterations
         .into_iter()
-        .filter(|iteration| iteration.kind == "advisor_message")
+        .filter(|value| value.get("type").and_then(|t| t.as_str()) == Some("advisor_message"))
+        .filter_map(|value| serde_json::from_value::<UsageIteration>(value).ok())
         .filter_map(|iteration| {
             iteration
                 .model
