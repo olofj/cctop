@@ -204,10 +204,13 @@ pub(crate) fn parse_litellm_json(json: &str) -> Result<HashMap<String, ModelPric
         // Fast-mode multiplier: LiteLLM carries it on some entries
         // (provider_specific_entry.fast); the override table covers the
         // rest so e.g. anthropic.* Bedrock aliases keep their fast rates.
+        // A value below 1 would discount fast mode (0 would make it free):
+        // treat it as missing.
         let fast_multiplier = obj
             .get("provider_specific_entry")
             .and_then(|v| v.get("fast"))
             .and_then(|v| v.as_f64())
+            .filter(|m| m.is_finite() && *m >= 1.0)
             .unwrap_or_else(|| fast_multiplier_for(&normalize(&name.to_ascii_lowercase())));
 
         let pricing = ModelPricing {
@@ -328,6 +331,23 @@ mod tests {
         assert_eq!(map["anthropic.claude-opus-4-8"].fast_multiplier, 2.0);
         // No override and no entry field: 1x.
         assert_eq!(map["claude-test-derived"].fast_multiplier, 1.0);
+    }
+
+    #[test]
+    fn bogus_fast_value_does_not_discount() {
+        // A 0 (or sub-1) fast value would make fast mode free or cheaper
+        // than standard; fall back to the override table, else 1x.
+        let map = parse_litellm_json(
+            r#"{
+            "claude-opus-4-8": {"input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05,
+                "provider_specific_entry": {"fast": 0}},
+            "claude-test-x": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06,
+                "provider_specific_entry": {"fast": 0.5}}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(map["claude-opus-4-8"].fast_multiplier, 2.0);
+        assert_eq!(map["claude-test-x"].fast_multiplier, 1.0);
     }
 
     #[test]

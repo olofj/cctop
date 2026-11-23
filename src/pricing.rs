@@ -156,14 +156,27 @@ pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
         ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)).with_fast(2.0),
     );
 
-    // Opus 5: no fast mode.
+    // 5.x generation. Fast mode bills 2x on Opus and Fable (LiteLLM's
+    // provider_specific_entry.fast); Sonnet and Haiku have no fast mode.
     ins(
         "claude-opus-5",
-        ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)),
+        ModelPricing::new(mtok(5.0), mtok(25.0), mtok(6.25), mtok(0.50)).with_fast(2.0),
+    );
+    ins(
+        "claude-opus-5-5",
+        ModelPricing::new(mtok(4.0), mtok(20.0), mtok(5.0), mtok(0.20)).with_fast(2.0),
+    );
+    ins(
+        "claude-sonnet-5-5",
+        ModelPricing::new(mtok(2.0), mtok(10.0), mtok(2.50), mtok(0.10)),
+    );
+    ins(
+        "claude-haiku-5-5",
+        ModelPricing::new(mtok(0.10), mtok(0.50), mtok(0.125), mtok(0.01)),
     );
 
-    // Fable 5 / 5.1: rates from Anthropic's published pricing; note
-    // Fable 5.1's cheaper cache reads.
+    // Fable 5 / 5.1 / 5.2: rates from Anthropic's published pricing; note
+    // the cheaper cache reads from 5.1 on.
     ins(
         "claude-fable-5",
         ModelPricing::new(mtok(10.0), mtok(50.0), mtok(12.50), mtok(1.0)),
@@ -171,6 +184,10 @@ pub fn builtin_pricing() -> HashMap<String, ModelPricing> {
     ins(
         "claude-fable-5-1",
         ModelPricing::new(mtok(10.0), mtok(50.0), mtok(12.50), mtok(0.25)),
+    );
+    ins(
+        "claude-fable-5-2",
+        ModelPricing::new(mtok(8.0), mtok(40.0), mtok(10.0), mtok(0.20)).with_fast(2.0),
     );
 
     m
@@ -846,7 +863,7 @@ mod tests {
         let p = lookup_pricing("claude-opus-5").unwrap();
         assert_eq!(p.input, mtok(5.0));
         assert_eq!(p.cache_read, mtok(0.50));
-        assert_eq!(p.fast_multiplier, 1.0);
+        assert_eq!(p.fast_multiplier, 2.0);
 
         let p = lookup_pricing("claude-fable-5-1").unwrap();
         assert_eq!(p.input, mtok(10.0));
@@ -862,6 +879,28 @@ mod tests {
             lookup_pricing("claude-fable-5").unwrap().cache_read,
             mtok(1.0)
         );
+    }
+
+    #[test]
+    fn five_x_generation_priced_offline() {
+        let builtin = builtin_pricing();
+        // Real ids as Claude Code records them, dotted spelling included.
+        // Opus 5.5 is the most-used model; before these entries it cost $0
+        // offline and landed in the unknown-models list.
+        for (model, input, cache_read, fast) in [
+            ("claude-opus-5-5", 4.0, 0.20, 2.0),
+            ("claude-opus-5.5", 4.0, 0.20, 2.0),
+            ("claude-opus-5-5[1m]", 4.0, 0.20, 2.0),
+            ("claude-sonnet-5-5", 2.0, 0.10, 1.0),
+            ("claude-haiku-5-5", 0.10, 0.01, 1.0),
+            ("claude-fable-5-2", 8.0, 0.20, 2.0),
+            ("claude-opus-5", 5.0, 0.50, 2.0),
+        ] {
+            let p = lookup_in(&builtin, model).unwrap_or_else(|| panic!("{model} unpriced"));
+            assert_eq!(p.input, mtok(input), "{model} input");
+            assert_eq!(p.cache_read, mtok(cache_read), "{model} cache read");
+            assert_eq!(p.fast_multiplier, fast, "{model} fast");
+        }
     }
 
     // ---- Decorated dynamic keys must not capture plain model ids ----
