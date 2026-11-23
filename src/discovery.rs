@@ -69,11 +69,16 @@ fn config_dirs_from_env(value: &str, home: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
-/// Whether `dir` names the same directory as one already listed, through
-/// symlinks or `..` as well as by spelling: walking one tree twice counts
-/// every line without a message id twice.
+/// Whether `dir`'s projects tree is one already listed, through symlinks
+/// or `..` as well as by spelling: walking one tree twice counts every line
+/// without a message id twice. Compared on `projects/` itself, since two
+/// distinct config dirs can share one (e.g. a symlinked projects/ left
+/// behind by a ~/.claude -> ~/.config/claude migration).
 fn contains_same_dir(paths: &[PathBuf], dir: &Path) -> bool {
-    let identity = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let identity = |p: &Path| {
+        let projects = p.join(PROJECTS_DIR);
+        projects.canonicalize().unwrap_or(projects)
+    };
     let wanted = identity(dir);
     paths.iter().any(|p| identity(p) == wanted)
 }
@@ -256,6 +261,13 @@ mod tests {
             config_dirs_from_env(&value, Some(home)),
             [home.join("cfg"), other]
         );
+
+        // Two config dirs sharing one projects tree count once.
+        let shared = home.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::os::unix::fs::symlink(cfg.join("projects"), shared.join("projects")).unwrap();
+        let value = format!("{p}/cfg,{p}/shared", p = home.display());
+        assert_eq!(config_dirs_from_env(&value, Some(home)), [home.join("cfg")]);
 
         // Nothing usable: empty, so the caller errors out rather than
         // silently showing the default directory's data.

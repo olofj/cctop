@@ -707,8 +707,12 @@ fn advisor_iterations_expand_and_dedup() {
 #[test]
 fn unusable_claude_config_dir_is_an_error_not_a_silent_fallback() {
     // A typo in CLAUDE_CONFIG_DIR used to fall back to ~/.claude with a
-    // warning the TUI immediately painted over.
+    // warning the TUI immediately painted over. A usable default exists
+    // here, so a silent fallback would list its project and exit 0.
     let tmp = TempDir::new().unwrap();
+    let default_project = tmp.path().join(".claude/projects/-default-proj");
+    std::fs::create_dir_all(&default_project).unwrap();
+    std::fs::write(default_project.join("s1.jsonl"), "").unwrap();
     let missing = tmp.path().join("typo");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_cctop"))
         .arg("--list-projects")
@@ -717,11 +721,11 @@ fn unusable_claude_config_dir_is_an_error_not_a_silent_fallback() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "fell back to the default dir");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("CLAUDE_CONFIG_DIR"), "{stderr}");
 
-    // A comma-only value means unset: the defaults (here an empty HOME)
-    // apply, so this is the "not installed" message instead.
+    // A comma-only value means unset: the defaults apply.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_cctop"))
         .arg("--list-projects")
         .env("CLAUDE_CONFIG_DIR", " , ")
@@ -729,9 +733,8 @@ fn unusable_claude_config_dir_is_an_error_not_a_silent_fallback() {
         .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("No Claude config directories"), "{stderr}");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "/default/proj");
 }
 
 #[test]
