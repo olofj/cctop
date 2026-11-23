@@ -69,6 +69,12 @@ fn main() -> io::Result<()> {
     // Discover Claude config paths
     let claude_paths = get_claude_paths();
     if claude_paths.is_empty() {
+        if let Some(value) = discovery::config_dir_env() {
+            eprintln!(
+                "error: no entry of CLAUDE_CONFIG_DIR ({value:?}) holds a projects/ directory"
+            );
+            std::process::exit(1);
+        }
         eprintln!("No Claude config directories found (~/.claude/projects/).");
         eprintln!("Is Claude Code installed?");
         std::process::exit(1);

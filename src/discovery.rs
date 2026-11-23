@@ -11,50 +11,84 @@ use crate::types::FileIdentity;
 const PROJECTS_DIR: &str = "projects";
 
 /// Returns Claude config directories that contain a `projects/` subdirectory.
+/// CLAUDE_CONFIG_DIR (comma-separated) replaces the defaults when it names
+/// any entry; the defaults are compared by canonical path, so a symlinked
+/// ~/.config/claude -> ~/.claude is walked once.
 pub fn get_claude_paths() -> Vec<PathBuf> {
-    if let Ok(env_val) = std::env::var("CLAUDE_CONFIG_DIR") {
-        let paths: Vec<PathBuf> = env_val
-            .split(',')
-            .map(|s| PathBuf::from(s.trim()))
-            .filter(|p| p.join(PROJECTS_DIR).is_dir())
-            .collect();
-        if !paths.is_empty() {
-            return paths;
-        }
-        // An explicit override that matches nothing shouldn't be silently
-        // ignored — say so before falling back to the default locations.
-        eprintln!(
-            "warning: CLAUDE_CONFIG_DIR='{env_val}' contains no projects/ directory; using defaults"
-        );
+    if let Some(value) = config_dir_env() {
+        return config_dirs_from_env(&value, dirs::home_dir().as_deref());
     }
 
-    let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        // ~/.claude (legacy and current default)
-        let default_claude = home.join(".claude");
-        if default_claude.join(PROJECTS_DIR).is_dir() {
-            paths.push(default_claude);
-        }
-
-        // ~/.config/claude (Claude Code v1.0.30+, used on macOS and Linux)
-        // Checked explicitly because dirs::config_dir() on macOS returns
-        // ~/Library/Application Support/ which is not where Claude stores data.
-        let dotconfig_claude = home.join(".config").join("claude");
-        if dotconfig_claude.join(PROJECTS_DIR).is_dir() && !paths.contains(&dotconfig_claude) {
-            paths.push(dotconfig_claude);
-        }
-    }
-    // Also check the platform config dir (XDG on Linux, ~/Library/Application Support on macOS)
-    if let Some(config) = dirs::config_dir() {
-        let xdg_claude = config.join("claude");
-        if xdg_claude.join(PROJECTS_DIR).is_dir() && !paths.contains(&xdg_claude) {
-            paths.push(xdg_claude);
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let home = dirs::home_dir();
+    let candidates = [
+        home.as_ref().map(|h| h.join(".claude")),
+        home.as_ref().map(|h| h.join(".config").join("claude")),
+        dirs::config_dir().map(|c| c.join("claude")),
+    ];
+    for dir in candidates.into_iter().flatten() {
+        if dir.join(PROJECTS_DIR).is_dir() && !contains_same_dir(&paths, &dir) {
+            paths.push(dir);
         }
     }
     paths
 }
 
-/// Returns the `projects/` directories for the given config bases.
+/// CLAUDE_CONFIG_DIR when it names at least one entry. Unset, empty, or
+/// comma-only values mean "use the defaults".
+pub fn config_dir_env() -> Option<String> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|v| v.split(',').any(|e| !e.trim().is_empty()))
+}
+
+/// The config dirs named by a comma-separated CLAUDE_CONFIG_DIR value.
+/// Entries may start with `~`, may name the `projects/` directory itself,
+/// and repeats are dropped. Entries without a `projects/` directory are
+/// skipped; when none has one, the result is empty and the caller reports
+/// an error instead of quietly falling back to the defaults (a typo would
+/// otherwise show the default directory's data without warning).
+fn config_dirs_from_env(value: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let Some(dir) = expand_home(entry, home) else {
+            continue;
+        };
+        let dir = if dir.file_name().is_some_and(|n| n == PROJECTS_DIR)
+            && dir.is_dir()
+            && !dir.join(PROJECTS_DIR).is_dir()
+        {
+            dir.parent().map(Path::to_path_buf).unwrap_or(dir)
+        } else {
+            dir
+        };
+        if dir.join(PROJECTS_DIR).is_dir() && !contains_same_dir(&paths, &dir) {
+            paths.push(dir);
+        }
+    }
+    paths
+}
+
+/// Whether `dir` names the same directory as one already listed, through
+/// symlinks or `..` as well as by spelling: walking one tree twice counts
+/// every line without a message id twice.
+fn contains_same_dir(paths: &[PathBuf], dir: &Path) -> bool {
+    let identity = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let wanted = identity(dir);
+    paths.iter().any(|p| identity(p) == wanted)
+}
+
+/// Expand a leading `~` or `~/`; other entries are taken literally.
+fn expand_home(entry: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if entry == "~" {
+        return home.map(Path::to_path_buf);
+    }
+    match entry.strip_prefix("~/") {
+        Some(rest) => home.map(|h| h.join(rest)),
+        None => Some(PathBuf::from(entry)),
+    }
+}
+
 pub fn get_projects_dirs(claude_paths: &[PathBuf]) -> Vec<PathBuf> {
     claude_paths
         .iter()
@@ -84,75 +118,62 @@ pub fn glob_usage_files(claude_paths: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
+/// Path components below the transcript's `projects/` root. The root is
+/// the LAST `projects` component, so a config dir that itself sits under a
+/// directory named `projects` (e.g. CLAUDE_CONFIG_DIR=/x/projects/cfg)
+/// still attributes files to their own project (upstream a2870cee).
+fn components_below_projects(path: &Path) -> Option<Vec<&str>> {
+    let components: Vec<&str> = path
+        .components()
+        .map(|c| c.as_os_str().to_str().unwrap_or(""))
+        .collect();
+    let root = components.iter().rposition(|c| *c == PROJECTS_DIR)?;
+    Some(components[root + 1..].to_vec())
+}
+
 /// Extract project name from JSONL file path.
 /// e.g. `.../projects/-home-olof-ccusage/...` → `/home/olof/ccusage`
 pub fn extract_project_from_path(path: &Path) -> String {
-    let components: Vec<&str> = path
-        .components()
-        .map(|c| c.as_os_str().to_str().unwrap_or(""))
-        .collect();
-
-    for (i, comp) in components.iter().enumerate() {
-        if *comp == PROJECTS_DIR
-            && let Some(project_dir) = components.get(i + 1)
-        {
-            return decode_project_name(project_dir);
-        }
+    match components_below_projects(path).as_deref() {
+        Some([project_dir, _, ..]) => decode_project_name(project_dir),
+        _ => String::from("unknown"),
     }
-    String::from("unknown")
 }
 
-/// Extract session ID from path.
-///
-/// For main session files: `.../projects/-proj/UUID.jsonl` → UUID (from filename stem)
-/// For files inside session dirs: `.../projects/-proj/UUID/subagents/agent.jsonl` → UUID
+/// `<proj>/<session>.jsonl` -> the file stem; anything deeper
+/// (`<proj>/<session>/subagents/...`) -> the session directory.
 pub fn extract_session_from_path(path: &Path) -> String {
-    let components: Vec<&str> = path
-        .components()
-        .map(|c| c.as_os_str().to_str().unwrap_or(""))
-        .collect();
-
-    // Find the "projects" component
-    for (i, comp) in components.iter().enumerate() {
-        if *comp == PROJECTS_DIR {
-            // components[i+1] is the project dir (e.g. "-home-olof-cctop")
-            // components[i+2] is either:
-            //   - "UUID.jsonl" (main session file) → use stem as session ID
-            //   - "UUID" (session directory) → use as session ID
-            if let Some(next) = components.get(i + 2) {
-                // If this component ends with .jsonl, it's a root session file
-                if next.ends_with(".jsonl") {
-                    return next.strip_suffix(".jsonl").unwrap_or(next).to_string();
-                }
-                // Otherwise it's the session UUID directory
-                return next.to_string();
-            }
+    if let Some(below) = components_below_projects(path) {
+        match below.as_slice() {
+            [_, file] => return file.strip_suffix(".jsonl").unwrap_or(file).to_string(),
+            [_, session, _, ..] => return session.to_string(),
+            _ => {}
         }
     }
-
-    // Fallback
     path.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string()
 }
 
-/// Extract subagent ID if this is a subagent file.
-/// `.../subagents/agent-abc123.jsonl` → Some("agent-abc123")
+/// A `.jsonl` file anywhere below `<proj>/<session>/subagents/` is a
+/// subagent of that session, named by its path below `subagents/`:
+/// `agent-abc` for `subagents/agent-abc.jsonl`, and
+/// `workflows/<wf>/agent` for a workflow run's
+/// `subagents/workflows/<wf>/agent.jsonl` (upstream 58866ba6).
 pub fn extract_subagent_from_path(path: &Path) -> Option<String> {
-    let parent = path.parent()?;
-    let parent_name = parent.file_name()?.to_str()?;
-    if parent_name == "subagents" {
-        let stem = path.file_stem()?.to_str()?;
-        // Skip .meta.json files
-        if path.extension().is_some_and(|e| e == "jsonl") {
-            return Some(stem.to_string());
-        }
+    if path.extension().is_none_or(|e| e != "jsonl") {
+        return None;
     }
-    None
+    let below = components_below_projects(path)?;
+    // <proj>/<session>/subagents/<...>/<file>.jsonl
+    if below.len() < 4 || below[2] != "subagents" {
+        return None;
+    }
+    let rel = below[3..].join("/");
+    Some(rel.strip_suffix(".jsonl").unwrap_or(&rel).to_string())
 }
 
-/// Build a FileIdentity from a JSONL file path.
 pub fn classify_file(path: &Path) -> FileIdentity {
     FileIdentity {
         path: path.to_path_buf(),
@@ -212,6 +233,53 @@ mod tests {
         assert_eq!(id.project, "/home/olof/cctop");
         assert_eq!(id.session_id, "a513fce4");
         assert_eq!(id.subagent_id.as_deref(), Some("agent-abc"));
+    }
+
+    #[test]
+    fn config_dir_entries_expand_resolve_and_dedupe() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        let cfg = home.join("cfg");
+        std::fs::create_dir_all(cfg.join("projects")).unwrap();
+        let other = home.join("other");
+        std::fs::create_dir_all(other.join("projects")).unwrap();
+        std::os::unix::fs::symlink(&cfg, home.join("link")).unwrap();
+
+        // `~/` expansion, the projects/ dir itself, a symlink and a `..`
+        // spelling all name cfg: it must be walked once, or lines without
+        // a message id count twice. Entries lacking projects/ are skipped.
+        let value = format!(
+            " ~/cfg , {p}/cfg/projects, {p}/link, {p}/other/../cfg, {p}/missing, ,{p}/other",
+            p = home.display()
+        );
+        assert_eq!(
+            config_dirs_from_env(&value, Some(home)),
+            [home.join("cfg"), other]
+        );
+
+        // Nothing usable: empty, so the caller errors out rather than
+        // silently showing the default directory's data.
+        let none = format!("{}/missing", home.display());
+        assert!(config_dirs_from_env(&none, Some(home)).is_empty());
+    }
+
+    #[test]
+    fn attribution_uses_the_deepest_projects_root() {
+        // A config dir that itself lives under a directory named projects.
+        let path = PathBuf::from("/x/projects/cfg/projects/-home-u-app/s1.jsonl");
+        let id = classify_file(&path);
+        assert_eq!(id.project, "/home/u/app");
+        assert_eq!(id.session_id, "s1");
+    }
+
+    #[test]
+    fn workflow_runs_are_subagents_of_their_session() {
+        let path =
+            PathBuf::from("/h/.claude/projects/-home-u-app/s1/subagents/workflows/wf1/agent.jsonl");
+        let id = classify_file(&path);
+        assert_eq!(id.project, "/home/u/app");
+        assert_eq!(id.session_id, "s1");
+        assert_eq!(id.subagent_id.as_deref(), Some("workflows/wf1/agent"));
     }
 
     #[test]

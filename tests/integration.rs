@@ -703,3 +703,33 @@ fn advisor_iterations_expand_and_dedup() {
     assert_eq!(total.input_tokens, 2100, "main + advisor, replay collapsed");
     assert_eq!(total.output_tokens, 350);
 }
+
+#[test]
+fn unusable_claude_config_dir_is_an_error_not_a_silent_fallback() {
+    // A typo in CLAUDE_CONFIG_DIR used to fall back to ~/.claude with a
+    // warning the TUI immediately painted over.
+    let tmp = TempDir::new().unwrap();
+    let missing = tmp.path().join("typo");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cctop"))
+        .arg("--list-projects")
+        .env("CLAUDE_CONFIG_DIR", &missing)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("CLAUDE_CONFIG_DIR"), "{stderr}");
+
+    // A comma-only value means unset: the defaults (here an empty HOME)
+    // apply, so this is the "not installed" message instead.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cctop"))
+        .arg("--list-projects")
+        .env("CLAUDE_CONFIG_DIR", " , ")
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("No Claude config directories"), "{stderr}");
+}
