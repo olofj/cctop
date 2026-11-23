@@ -99,30 +99,36 @@ fn parse_record(line: &str, identity: &FileIdentity) -> Option<Vec<TokenEntry>> 
         .take()
         .unwrap_or_else(|| "unknown".to_string());
 
-    let make_entry =
-        |model: String, usage: &Usage, cost: f64, message_id: Option<String>| TokenEntry {
-            timestamp,
-            project: identity.project.clone(),
-            session_id: identity.session_id.clone(),
-            subagent_id: identity.subagent_id.clone(),
-            model: display_model(model, usage),
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_write_tokens: usage.cache_creation_token_count(),
-            cache_read_tokens: usage.cache_read_input_tokens,
-            cost,
-            message_id,
-            request_id: record.request_id.clone(),
-            is_sidechain: record.is_sidechain,
-            has_speed: usage.speed.is_some(),
-            dedup_session: dedup_session.clone(),
-        };
+    let make_entry = |model: String,
+                      usage: &Usage,
+                      cost: f64,
+                      message_id: Option<String>,
+                      records_cost: bool| TokenEntry {
+        timestamp,
+        project: identity.project.clone(),
+        session_id: identity.session_id.clone(),
+        subagent_id: identity.subagent_id.clone(),
+        model: display_model(model, usage),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_write_tokens: usage.cache_creation_token_count(),
+        cache_read_tokens: usage.cache_read_input_tokens,
+        cost,
+        message_id,
+        request_id: record.request_id.clone(),
+        is_sidechain: record.is_sidechain,
+        speed_rank: usage.speed_rank(),
+        has_cache_split: usage.cache_creation.is_some(),
+        records_cost,
+        dedup_session: dedup_session.clone(),
+    };
 
     let mut entries = vec![make_entry(
         model,
         &record.message.usage,
         cost,
         record.message.id.clone(),
+        record.cost_usd.is_some(),
     )];
 
     // Advisor iterations become distinct entries under the advisor's own
@@ -137,7 +143,7 @@ fn parse_record(line: &str, identity: &FileIdentity) -> Option<Vec<TokenEntry>> 
             .id
             .as_ref()
             .map(|id| format!("{id}:advisor:{index}"));
-        entries.push(make_entry(advisor_model, &usage, cost, message_id));
+        entries.push(make_entry(advisor_model, &usage, cost, message_id, false));
     }
 
     Some(entries)
@@ -332,8 +338,11 @@ pub fn start(
 
     let mut files = glob_usage_files(&claude_paths);
     // Deterministic scan order so the dedup merge downstream is reproducible
-    // regardless of filesystem traversal order.
-    files.sort();
+    // regardless of filesystem traversal order. Raw byte order, not Path's
+    // per-component order: it puts a parent transcript `<session>.jsonl`
+    // before its `<session>/subagents/*` files, so the parent copy wins
+    // exact ties.
+    files.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
     let mut all_entries = Vec::new();
     let mut file_states: HashMap<PathBuf, FileState> = HashMap::new();
 
@@ -481,7 +490,8 @@ mod parse_tests {
         assert_eq!(e.message_id.as_deref(), Some("m1"));
         assert_eq!(e.request_id.as_deref(), Some("r1"));
         assert_eq!(e.is_sidechain, None);
-        assert!(!e.has_speed);
+        assert_eq!(e.speed_rank, 0);
+        assert!(!e.has_cache_split && !e.records_cost);
     }
 
     #[test]
@@ -646,14 +656,14 @@ mod parse_tests {
     }
 
     #[test]
-    fn fast_speed_suffixes_model_and_sets_has_speed() {
+    fn fast_speed_suffixes_model_and_ranks_fast() {
         let line = r#"{"timestamp":"2026-06-09T10:00:00Z",
             "message":{"usage":{"input_tokens":1,"output_tokens":1,"speed":"fast"},
                 "model":"claude-opus-4-6","id":"m1"}}"#
             .replace('\n', "");
         let e = parse_one(&line);
         assert_eq!(e.model, "claude-opus-4-6-fast");
-        assert!(e.has_speed);
+        assert_eq!(e.speed_rank, 2);
     }
 
     // --- incremental reads and partial lines ---

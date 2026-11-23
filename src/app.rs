@@ -871,8 +871,21 @@ fn exact_dedupe_hash(
 /// messages under a NEW requestId, so the merge runs on (message_id,
 /// session) with a tag keeping the bucket distinct from exact keys.
 fn sidechain_dedupe_hash(message_id: &str, session: &str) -> u64 {
+    sidechain_bucket_hash("sidechain-replay", message_id, session)
+}
+
+/// The same (message_id, session) bucket restricted to entries that are
+/// themselves sidechain. A non-sidechain candidate can only merge with a
+/// sidechain survivor, so it probes this bucket alone; otherwise gateways
+/// that reuse one message id for every response make each insert scan
+/// every earlier one (upstream's sidechain-replay-entry bucket).
+fn sidechain_entry_dedupe_hash(message_id: &str, session: &str) -> u64 {
+    sidechain_bucket_hash("sidechain-replay-entry", message_id, session)
+}
+
+fn sidechain_bucket_hash(tag: &str, message_id: &str, session: &str) -> u64 {
     let mut h = FxHasher::default();
-    "sidechain-replay".hash(&mut h);
+    tag.hash(&mut h);
     message_id.hash(&mut h);
     session.hash(&mut h);
     h.finish()
@@ -886,15 +899,20 @@ fn sidechain_dedupe_hash(message_id: &str, session: &str) -> u64 {
 ///    session (or a registered alias of it), with at least one side flagged
 ///    isSidechain. Timestamps and request ids intentionally not compared.
 ///
-/// Every lookup verifies field equality, not just hash equality, since
-/// multiple entries can share a bucket and stale routes stay behind after
-/// a replacement changes an entry's keys.
+/// Lookups verify the message id, not just hash equality, since unrelated
+/// entries can share a bucket.
 fn push_deduped(entries: &mut Vec<TokenEntry>, index: &mut DedupIndex, entry: TokenEntry) {
     let Some(msg_id) = entry.message_id.clone() else {
         entries.push(entry);
         return;
     };
 
+    // 1. Exact-key match. The route was registered under this key by some
+    //    copy of the response, so it matches on message id alone: the
+    //    survivor it points at may since have been replaced by a copy with
+    //    another requestId/session/timestamp (via the sidechain route), and
+    //    re-checking those fields against the survivor would let a later
+    //    copy carrying the original key count again (upstream 146aca30).
     let exact_hash = exact_dedupe_hash(
         &msg_id,
         entry.request_id.as_deref(),
@@ -902,21 +920,25 @@ fn push_deduped(entries: &mut Vec<TokenEntry>, index: &mut DedupIndex, entry: To
         entry.timestamp,
     );
     let exact_hit = index.get(&exact_hash).and_then(|routes| {
-        routes.iter().map(|r| r.index).find(|&i| {
-            let existing = &entries[i];
-            existing.message_id.as_deref() == Some(msg_id.as_str())
-                && existing.request_id == entry.request_id
-                && (entry.request_id.is_some()
-                    || (existing.dedup_session == entry.dedup_session
-                        && existing.timestamp == entry.timestamp))
-        })
+        routes
+            .iter()
+            .find(|r| entries[r.index].message_id.as_deref() == Some(msg_id.as_str()))
+            .map(|r| r.index)
     });
     if let Some(i) = exact_hit {
         merge_duplicate(entries, index, i, &msg_id, entry);
         return;
     }
 
-    let side_hash = sidechain_dedupe_hash(&msg_id, &entry.dedup_session);
+    // 2. Sidechain-replay fallback. A sidechain candidate may merge with
+    //    any copy in its session; a non-sidechain one only with a sidechain
+    //    copy, so it probes the sidechain-only bucket.
+    let candidate_side = entry.is_sidechain == Some(true);
+    let side_hash = if candidate_side {
+        sidechain_dedupe_hash(&msg_id, &entry.dedup_session)
+    } else {
+        sidechain_entry_dedupe_hash(&msg_id, &entry.dedup_session)
+    };
     let side_hit = index.get(&side_hash).and_then(|routes| {
         routes.iter().find_map(|route| {
             let existing = &entries[route.index];
@@ -926,7 +948,7 @@ fn push_deduped(entries: &mut Vec<TokenEntry>, index: &mut DedupIndex, entry: To
                 .unwrap_or(existing.dedup_session.as_str());
             (indexed_session == entry.dedup_session
                 && existing.message_id.as_deref() == Some(msg_id.as_str())
-                && (entry.is_sidechain == Some(true) || existing.is_sidechain == Some(true)))
+                && (candidate_side || existing.is_sidechain == Some(true)))
             .then_some(route.index)
         })
     });
@@ -935,10 +957,10 @@ fn push_deduped(entries: &mut Vec<TokenEntry>, index: &mut DedupIndex, entry: To
         return;
     }
 
-    // No match: accept and index.
+    // No match: accept and index (a fresh slot cannot already be routed).
     let i = entries.len();
     entries.push(entry);
-    index_entry(index, entries, i, &msg_id);
+    index_entry(index, entries, i, &msg_id, true);
 }
 
 /// Handle a duplicate hit at `i`: register cross-session aliases, apply the
@@ -953,30 +975,46 @@ fn merge_duplicate(
 ) {
     if entries[i].dedup_session != candidate.dedup_session {
         // Cross-session copies can become the survivor; keep every session
-        // route usable by later sidechain replays.
+        // route usable by later sidechain replays. The sidechain-only
+        // bucket gets the alias too when a sidechain copy is involved, so
+        // non-sidechain replays from either session still find it.
+        let sidechain_involved =
+            entries[i].is_sidechain == Some(true) || candidate.is_sidechain == Some(true);
         for session in [&entries[i].dedup_session, &candidate.dedup_session] {
-            let routes = index
-                .entry(sidechain_dedupe_hash(msg_id, session))
-                .or_default();
-            if !routes
-                .iter()
-                .any(|r| r.index == i && r.session_alias.as_ref() == Some(session))
-            {
-                routes.push(DedupRoute {
-                    index: i,
-                    session_alias: Some(session.clone()),
-                });
+            let side = sidechain_dedupe_hash(msg_id, session);
+            let side_entry =
+                sidechain_involved.then(|| sidechain_entry_dedupe_hash(msg_id, session));
+            for hash in [Some(side), side_entry].into_iter().flatten() {
+                let routes = index.entry(hash).or_default();
+                if !routes
+                    .iter()
+                    .any(|r| r.index == i && r.session_alias.as_ref() == Some(session))
+                {
+                    routes.push(DedupRoute {
+                        index: i,
+                        session_alias: Some(session.clone()),
+                    });
+                }
             }
         }
     }
     if should_replace(&candidate, &entries[i]) {
         entries[i] = candidate;
-        index_entry(index, entries, i, msg_id);
+        index_entry(index, entries, i, msg_id, false);
     }
 }
 
-/// Register `entries[i]` under its exact and sidechain hashes (idempotent).
-fn index_entry(index: &mut DedupIndex, entries: &[TokenEntry], i: usize, msg_id: &str) {
+/// Register `entries[i]` under its exact and sidechain hashes, plus the
+/// sidechain-only bucket when it is itself a sidechain entry. `fresh` skips
+/// the already-present scan for a newly pushed slot, which keeps inserts
+/// O(1) in buckets shared by many entries.
+fn index_entry(
+    index: &mut DedupIndex,
+    entries: &[TokenEntry],
+    i: usize,
+    msg_id: &str,
+    fresh: bool,
+) {
     let entry = &entries[i];
     let exact = exact_dedupe_hash(
         msg_id,
@@ -985,11 +1023,14 @@ fn index_entry(index: &mut DedupIndex, entries: &[TokenEntry], i: usize, msg_id:
         entry.timestamp,
     );
     let side = sidechain_dedupe_hash(msg_id, &entry.dedup_session);
-    for hash in [exact, side] {
+    let side_entry = (entry.is_sidechain == Some(true))
+        .then(|| sidechain_entry_dedupe_hash(msg_id, &entry.dedup_session));
+    for hash in [Some(exact), Some(side), side_entry].into_iter().flatten() {
         let routes = index.entry(hash).or_default();
-        if !routes
-            .iter()
-            .any(|r| r.index == i && r.session_alias.is_none())
+        if fresh
+            || !routes
+                .iter()
+                .any(|r| r.index == i && r.session_alias.is_none())
         {
             routes.push(DedupRoute {
                 index: i,
@@ -1001,10 +1042,12 @@ fn index_entry(index: &mut DedupIndex, entries: &[TokenEntry], i: usize, msg_id:
 
 /// Decide whether a colliding candidate should replace the existing entry.
 ///
-/// Tiers: non-sidechain beats sidechain (the replayed copy can carry the
-/// parent's huge cache reads); then larger token total; then higher cost
-/// (a subagent file entry carries costUSD while its progress-line twin does
-/// not); then presence of a speed field.
+/// Mirrors upstream's should_replace_deduped_entry: non-sidechain beats
+/// sidechain (the replayed copy can carry the parent's huge cache reads);
+/// then the larger token total; then the copy that reports more of the
+/// request: speed rank (fast > standard > none), then the 5m/1h cache
+/// split, then a recorded costUSD. Priced cost never decides, so the
+/// survivor does not depend on which pricing source loaded.
 fn should_replace(candidate: &TokenEntry, existing: &TokenEntry) -> bool {
     let cand_side = candidate.is_sidechain == Some(true);
     let exist_side = existing.is_sidechain == Some(true);
@@ -1016,10 +1059,8 @@ fn should_replace(candidate: &TokenEntry, existing: &TokenEntry) -> bool {
     if cand_tokens != exist_tokens {
         return cand_tokens > exist_tokens;
     }
-    if candidate.cost != existing.cost {
-        return candidate.cost > existing.cost;
-    }
-    candidate.has_speed && !existing.has_speed
+    let detail = |e: &TokenEntry| (e.speed_rank, e.has_cache_split, e.records_cost);
+    detail(candidate) > detail(existing)
 }
 
 /// Remap the dedup index after storage compaction: `new_pos[old]` is the
@@ -1287,12 +1328,15 @@ mod tests {
             )),
             request_id: Some("r1".to_string()),
             is_sidechain: None,
-            has_speed: false,
+            speed_rank: 0,
+            has_cache_split: false,
+            records_cost: false,
             dedup_session: session.to_string(),
         }
     }
 
-    /// Entry shaped for dedup tests (ccusage's make_entry).
+    /// Entry shaped for dedup tests (ccusage's make_entry). A nonzero cost
+    /// stands for a recorded costUSD; `has_speed` for a standard speed.
     fn dedup_entry(
         msg_id: Option<&str>,
         req_id: Option<&str>,
@@ -1315,7 +1359,9 @@ mod tests {
             message_id: msg_id.map(String::from),
             request_id: req_id.map(String::from),
             is_sidechain,
-            has_speed,
+            speed_rank: u8::from(has_speed),
+            has_cache_split: false,
+            records_cost: cost > 0.0,
             dedup_session: "s1".to_string(),
         }
     }
@@ -1796,32 +1842,95 @@ mod tests {
     }
 
     #[test]
-    fn equal_tokens_higher_cost_wins() {
+    fn equal_tokens_recorded_cost_wins() {
         // Subagent-file entry carries costUSD; its cost-less progress twin
         // must lose regardless of read order.
-        let result = merge(vec![
-            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
-            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.06, false),
-        ]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].cost, 0.06);
-
-        let result = merge(vec![
-            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.06, false),
-            dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
-        ]);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].cost, 0.06);
+        for order in [[0.0, 0.06], [0.06, 0.0]] {
+            let result = merge(
+                order
+                    .iter()
+                    .map(|&c| dedup_entry(Some("m1"), Some("r1"), None, 100, c, false))
+                    .collect(),
+            );
+            assert_eq!(result.len(), 1);
+            assert!(result[0].records_cost);
+        }
     }
 
     #[test]
-    fn equal_tokens_and_cost_speed_wins() {
+    fn equal_tokens_speed_wins() {
         let result = merge(vec![
             dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false),
             dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, true),
         ]);
         assert_eq!(result.len(), 1);
-        assert!(result[0].has_speed);
+        assert_eq!(result[0].speed_rank, 1);
+    }
+
+    #[test]
+    fn tie_break_ignores_priced_cost() {
+        // Equal tokens: the copy that reports more of the request (here the
+        // 5m/1h cache split) wins even when the other priced higher, so the
+        // survivor cannot depend on which pricing source loaded.
+        let split = || {
+            let mut e = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false);
+            e.has_cache_split = true;
+            e
+        };
+        let pricier = || {
+            let mut e = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, false);
+            e.cost = 9.9;
+            e
+        };
+        for order in [vec![pricier(), split()], vec![split(), pricier()]] {
+            let result = merge(order);
+            assert_eq!(result.len(), 1);
+            assert!(result[0].has_cache_split);
+        }
+    }
+
+    #[test]
+    fn fast_outranks_standard_speed() {
+        let standard = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, true);
+        let mut fast = dedup_entry(Some("m1"), Some("r1"), None, 100, 0.0, true);
+        fast.speed_rank = 2;
+        fast.model = "claude-opus-4-6-fast".to_string();
+        let result = merge(vec![standard, fast]);
+        assert_eq!(result[0].model, "claude-opus-4-6-fast");
+    }
+
+    #[test]
+    fn exact_route_survives_replacement_of_its_entry() {
+        // r2 replaces r1 via the sidechain route; a later copy of r1 from
+        // another session must still merge into that slot (its exact key
+        // was registered by r1), not count again.
+        let t = fixed_now();
+        let result = merge(vec![
+            dedup_entry_in("m", Some("r1"), Some(true), 100, "s1", t),
+            dedup_entry_in("m", Some("r2"), Some(true), 200, "s1", t),
+            dedup_entry_in("m", Some("r1"), Some(true), 100, "s2", t),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].input_tokens, 200);
+    }
+
+    #[test]
+    fn reused_message_id_stays_linear() {
+        // A gateway reusing one message id for every response, with
+        // distinct request ids: nothing merges, and the insert must not
+        // scan every earlier entry (quadratic: ~tens of seconds here).
+        let n = 30_000;
+        let start = std::time::Instant::now();
+        let result = merge(
+            (0..n)
+                .map(|i| {
+                    let req = format!("r{i}");
+                    dedup_entry(Some("m"), Some(&req), None, 1, 0.0, false)
+                })
+                .collect(),
+        );
+        assert_eq!(result.len(), n);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

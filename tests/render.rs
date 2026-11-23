@@ -28,7 +28,9 @@ fn entry(project: &str, model: &str, msg: &str, input: u64) -> TokenEntry {
         message_id: Some(msg.to_string()),
         request_id: Some(msg.to_string()),
         is_sidechain: None,
-        has_speed: false,
+        speed_rank: 0,
+        has_cache_split: false,
+        records_cost: false,
         dedup_session: format!("sess-{project}"),
     }
 }

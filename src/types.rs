@@ -52,6 +52,15 @@ pub struct CacheCreation {
 }
 
 impl Usage {
+    /// Rank of the recorded speed for duplicate selection.
+    pub fn speed_rank(&self) -> u8 {
+        match self.speed.as_deref() {
+            None => 0,
+            Some("fast") => 2,
+            Some(_) => 1,
+        }
+    }
+
     /// Total cache-creation tokens: the 5m/1h breakdown when present,
     /// otherwise the flat field.
     pub fn cache_creation_token_count(&self) -> u64 {
@@ -191,7 +200,13 @@ pub struct TokenEntry {
     pub message_id: Option<String>,
     pub request_id: Option<String>,
     pub is_sidechain: Option<bool>,
-    pub has_speed: bool,
+    /// Recorded speed for duplicate selection: 0 none, 1 standard, 2 fast.
+    pub speed_rank: u8,
+    /// The usage carried the 5m/1h cache-creation split.
+    pub has_cache_split: bool,
+    /// The line carried a costUSD (a subagent file entry does, its
+    /// progress-line twin does not).
+    pub records_cost: bool,
     /// Effective session for dedup scoping: the line's sessionId field,
     /// falling back to the path-derived session.
     pub dedup_session: String,
