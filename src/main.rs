@@ -89,7 +89,7 @@ fn main() -> io::Result<()> {
             .map(|p| discovery::extract_project_from_path(p))
             .collect();
         for p in &projects {
-            println!("{}", p);
+            println!("{}", types::sanitize_terminal_text(p));
         }
         std::process::exit(0);
     }
@@ -225,7 +225,11 @@ fn main() -> io::Result<()> {
     if !unknowns.is_empty() {
         eprintln!(
             "Unknown models (no pricing data, cost treated as $0): {}",
-            unknowns.join(", ")
+            unknowns
+                .iter()
+                .map(|m| types::sanitize_terminal_text(m))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 

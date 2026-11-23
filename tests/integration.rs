@@ -733,3 +733,22 @@ fn unusable_claude_config_dir_is_an_error_not_a_silent_fallback() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("No Claude config directories"), "{stderr}");
 }
+
+#[test]
+fn list_projects_escapes_control_characters() {
+    // Project names come straight from directory names; a crafted one
+    // must not reach the terminal as an escape sequence.
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("projects").join("-evil\u{1b}]0;PWNED\u{7}");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("s1.jsonl"), "").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cctop"))
+        .arg("--list-projects")
+        .env("CLAUDE_CONFIG_DIR", tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    assert!(stdout.contains(r"\u{1b}]0;PWNED\u{7}"), "{stdout:?}");
+}

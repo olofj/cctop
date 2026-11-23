@@ -22,6 +22,28 @@ pub struct RawRecord {
     pub session_id: Option<String>,
 }
 
+/// Escape control characters in text taken from transcripts (model ids,
+/// project names) before printing it outside the TUI, so a crafted log
+/// cannot send escape sequences (window titles, colors, cursor moves) to
+/// the user's terminal. ratatui already drops control characters from
+/// what it renders. Mirrors upstream's sanitize_terminal_text.
+pub fn sanitize_terminal_text(value: &str) -> String {
+    if !value.chars().any(char::is_control) {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .flat_map(|c| {
+            let escaped: Vec<char> = if c.is_control() {
+                c.escape_default().collect()
+            } else {
+                vec![c]
+            };
+            escaped
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Message {
     pub usage: Usage,
